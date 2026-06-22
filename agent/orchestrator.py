@@ -16,6 +16,7 @@ from agent.git_utils import (
     create_worktree,
     ensure_git_repo,
     fetch_remote,
+    find_worktree_for_branch,
     get_current_branch,
     get_git_diff,
     get_git_status,
@@ -178,11 +179,13 @@ def run_orchestrator(
     remote: str | None = None,
     subagents_config_path: Path | None = None,
     setup_only: bool = False,
+    plan_only: bool = False,
 ) -> OrchestrationResult:
     """Run the safe orchestration loop, or simulate it in ``dry_run`` mode.
 
     A dry run writes only run metadata. It never calls Claude, runs verification,
-    creates a worktree, or modifies the target repository.
+    creates a worktree, or modifies the target repository. ``plan_only`` executes
+    only the planner phase and then records read-only Git state.
     """
     project_root = Path(__file__).resolve().parent.parent
     resolved_repo_path = repo_path.expanduser().resolve()
@@ -192,6 +195,8 @@ def run_orchestrator(
         raise ValueError(f"Repository path is not a Git work tree: {resolved_repo_path}")
     if not task.strip():
         raise ValueError("Task must not be empty")
+    if setup_only and plan_only:
+        raise ValueError("plan_only and setup_only cannot be used together")
 
     config = deepcopy(load_config(config_path))
     project_config = _mapping(config, "project")
@@ -255,13 +260,15 @@ def run_orchestrator(
 
     run_dir = _create_run_dir(project_root / "runs")
     _write_markdown(run_dir / "task.md", f"# Task\n\n{task.strip()}")
-    (run_dir / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    (run_dir / "config_snapshot.yaml").write_text(
+        yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
+    )
     _write_markdown(run_dir / "pipeline.md", "# Intended Pipeline\n\n" + "\n".join(
         f"{index}. {step}" for index, step in enumerate(PIPELINE_STEPS, start=1)
     ))
 
     active_repo_path = resolved_repo_path
-    created_worktree: Path | None = None
+    worktree_path: Path | None = None
     current_branch = get_current_branch(resolved_repo_path)
     worktree_note = "not requested"
     if selected_use_worktree:
@@ -274,19 +281,30 @@ def run_orchestrator(
         if dry_run:
             print(f"Dry run: would create local worktree for {worktree_note}.")
         else:
-            base_is_available = branch_exists(
-                resolved_repo_path, selected_base_branch
-            ) or remote_branch_exists(resolved_repo_path, selected_remote, selected_base_branch)
-            if not base_is_available:
-                fetch_remote(resolved_repo_path, selected_remote)
-            created_worktree = create_worktree(
-                resolved_repo_path,
-                selected_worktree_root,
-                selected_agent_branch,
-                selected_base_branch,
-                selected_remote,
+            existing_worktree = (
+                find_worktree_for_branch(resolved_repo_path, selected_agent_branch)
+                if plan_only
+                else None
             )
-            active_repo_path = created_worktree
+            if existing_worktree is not None:
+                worktree_path = existing_worktree
+                worktree_note = f"using existing worktree at {existing_worktree}"
+            else:
+                base_is_available = branch_exists(
+                    resolved_repo_path, selected_base_branch
+                ) or remote_branch_exists(
+                    resolved_repo_path, selected_remote, selected_base_branch
+                )
+                if not base_is_available:
+                    fetch_remote(resolved_repo_path, selected_remote)
+                worktree_path = create_worktree(
+                    resolved_repo_path,
+                    selected_worktree_root,
+                    selected_agent_branch,
+                    selected_base_branch,
+                    selected_remote,
+                )
+            active_repo_path = worktree_path
             current_branch = get_current_branch(active_repo_path)
 
     print("Prepared orchestration pipeline:")
@@ -301,7 +319,7 @@ def run_orchestrator(
         "backend": selected_backend,
         "target repository": str(active_repo_path),
         "starting branch": current_branch,
-        "worktree": str(created_worktree) if created_worktree else worktree_note,
+        "worktree": str(worktree_path) if worktree_path else worktree_note,
         "verification": "not run",
         "fix attempts": 0,
         "changed files": 0,
@@ -314,27 +332,39 @@ def run_orchestrator(
             details["next steps"] = "Run a planner phase separately; no Claude phase was invoked."
             report_path = write_report(run_dir, task, status, details)
             return OrchestrationResult(
-                run_dir, report_path, status, active_repo_path, created_worktree
+                run_dir, report_path, status, active_repo_path, worktree_path
             )
 
         if dry_run:
-            for phase in ("planner", "implementer", "reviewer"):
-                _write_markdown(run_dir / f"{phase}_output.md", _dry_run_output(phase))
-            _write_markdown(
-                run_dir / "diff_after_implementer.patch",
-                "# Dry-run Diff\n\nNo target repository diff was collected or created.",
-            )
-            _write_verification(
-                run_dir / "verification_attempt_1.txt",
-                {"dry-run": "exit code: skipped\nstdout:\n\nstderr:\nVerification was not run."},
-            )
+            _write_markdown(run_dir / "planner_output.md", _dry_run_output("planner"))
+            if plan_only:
+                planner_prompt = _read_prompt(subagents["planner"], task, active_repo_path)
+                _write_markdown(run_dir / "planner_prompt.md", planner_prompt)
+                dry_run_status = get_git_status(active_repo_path)
+                dry_run_diff = get_git_diff(active_repo_path)
+                _write_markdown(run_dir / "git_status.txt", dry_run_status or "Working tree clean.")
+                _write_markdown(run_dir / "git_diff.patch", dry_run_diff or "# No Diff\n")
+            else:
+                for phase in ("implementer", "reviewer"):
+                    _write_markdown(run_dir / f"{phase}_output.md", _dry_run_output(phase))
+                _write_markdown(
+                    run_dir / "diff_after_implementer.patch",
+                    "# Dry-run Diff\n\nNo target repository diff was collected or created.",
+                )
+                _write_verification(
+                    run_dir / "verification_attempt_1.txt",
+                    {"dry-run": "exit code: skipped\nstdout:\n\nstderr:\nVerification was not run."},
+                )
             details["verification"] = "skipped (dry run)"
             details["risks"] = "No Claude or verification command was executed."
-            status = "dry-run"
+            details["mode"] = "plan-only" if plan_only else "full-pipeline"
+            status = "dry-run-plan-only" if plan_only else "dry-run"
         else:
+            planner_prompt = _read_prompt(subagents["planner"], task, active_repo_path)
+            _write_markdown(run_dir / "planner_prompt.md", planner_prompt)
             planner_output = _run_phase(
                 phase="planner",
-                prompt=_read_prompt(subagents["planner"], task, active_repo_path),
+                prompt=planner_prompt,
                 task=task,
                 repo_path=active_repo_path,
                 backend=selected_backend,
@@ -342,6 +372,23 @@ def run_orchestrator(
                 max_budget_usd=float(max_budget) if max_budget is not None else None,
             )
             _write_markdown(run_dir / "planner_output.md", planner_output)
+
+            if plan_only:
+                planner_status = get_git_status(active_repo_path)
+                planner_diff = get_git_diff(active_repo_path)
+                _write_markdown(run_dir / "git_status.txt", planner_status or "Working tree clean.")
+                _write_markdown(run_dir / "git_diff.patch", planner_diff or "# No Diff\n")
+                details["verification"] = "not run (plan-only)"
+                details["git status"] = planner_status or "working tree clean"
+                details["diff lines"] = len(planner_diff.splitlines())
+                details["mode"] = "plan-only"
+                details["risks"] = "Planner output is advisory; review it before any implementation."
+                details["next steps"] = "Review planner_output.md before allowing implementation."
+                status = "plan-only-complete"
+                report_path = write_report(run_dir, task, status, details)
+                return OrchestrationResult(
+                    run_dir, report_path, status, active_repo_path, worktree_path
+                )
 
             implementer_output = _run_phase(
                 phase="implementer",
@@ -433,7 +480,7 @@ def run_orchestrator(
             status = "completed" if passed else "verification-failed"
 
         report_path = write_report(run_dir, task, status, details)
-        return OrchestrationResult(run_dir, report_path, status, active_repo_path, created_worktree)
+        return OrchestrationResult(run_dir, report_path, status, active_repo_path, worktree_path)
     except Exception as error:
         details["failure"] = str(error)
         write_report(run_dir, task, "failed", details)

@@ -44,10 +44,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=PROJECT_ROOT / "configs" / "subagents.default.yaml",
         help="Subagent YAML configuration file.",
     )
-    parser.add_argument(
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "--setup-only",
         action="store_true",
         help="Prepare/report worktree setup without invoking planner or other Claude phases.",
+    )
+    mode_group.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="Run or simulate only the planner phase, then stop before implementation.",
     )
     return parser
 
@@ -86,6 +92,7 @@ def main() -> int:
             remote=args.remote,
             subagents_config_path=args.subagents_config,
             setup_only=args.setup_only,
+            plan_only=args.plan_only,
         )
     except (FileNotFoundError, NotADirectoryError, RuntimeError, ValueError) as error:
         parser.error(str(error))

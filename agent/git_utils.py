@@ -106,6 +106,22 @@ def fetch_remote(path: Path, remote: str = "origin") -> str:
     return _git_output_or_error(result, f"fetch from '{remote}'")
 
 
+def find_worktree_for_branch(repo_path: Path, branch_name: str) -> Path | None:
+    """Return an existing linked worktree checked out at *branch_name*, if any."""
+    result = _run_git(repo_path, "worktree", "list", "--porcelain")
+    output = _git_output_or_error(result, "worktree listing")
+    current_worktree: Path | None = None
+    expected_ref = f"refs/heads/{branch_name}"
+    for line in output.splitlines() + [""]:
+        if line.startswith("worktree "):
+            current_worktree = Path(line.removeprefix("worktree "))
+        elif line == "":
+            current_worktree = None
+        elif line == f"branch {expected_ref}" and current_worktree is not None:
+            return current_worktree.resolve()
+    return None
+
+
 def create_worktree(
     repo_path: Path,
     worktree_root: Path,

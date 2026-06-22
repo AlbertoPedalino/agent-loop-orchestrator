@@ -55,6 +55,12 @@ python -m agent.main --repo-path . --task "test task" --dry-run
 
 Run artifacts are ignored by Git except `runs/.gitkeep`.
 
+## Plan-only mode
+
+Use `--plan-only` for the first real Claude interaction with an external repository. It creates run metadata, invokes only the read-only planner, captures Git status/diff, writes `planner_output.md`, and stops before implementation, verification, fixing, or review. It is incompatible with `--setup-only`; combined with `--dry-run`, it simulates the same plan-only artifacts without calling Claude.
+
+The planner prompt explicitly requires plan-only behavior: no file edits, modification commands, commits, or pushes. With `--use-worktree`, plan-only reuses the selected existing worktree when one is present, otherwise it safely creates the configured local worktree first.
+
 ## GM-Board example
 
 After cloning GM-Board into a separate external workspace and confirming its base branch, use:
@@ -71,7 +77,19 @@ python -m agent.main \
   --dry-run
 ```
 
-To create only the local worktree/branch without invoking Claude, remove `--dry-run` and add `--setup-only`. Review the generated report before running a real planner phase.
+To create only the local worktree/branch without invoking Claude, remove `--dry-run` and add `--setup-only`. After reviewing setup output, a safe first real Claude phase is:
+
+```powershell
+.\.venv\Scripts\python.exe -m agent.main `
+  --repo-path ../external/GM-Board `
+  --config configs/gm-board.yaml `
+  --task "Inspect the feature/unified-character-storage branch and produce a safe implementation plan only. Do not modify files." `
+  --backend cli `
+  --use-worktree `
+  --base-branch feature/unified-character-storage `
+  --agent-branch agent/apply-orchestrator-feature-unified-character-storage `
+  --plan-only
+```
 
 ## Safety notes
 

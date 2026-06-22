@@ -44,3 +44,17 @@ def test_create_worktree_uses_git_c_and_safe_arguments(
 
     assert worktree == (tmp_path / "worktrees" / "agent-test").resolve()
     assert commands == [("worktree", "add", "-b", "agent/test", str(worktree), "base")]
+
+
+def test_find_worktree_for_branch_parses_porcelain(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    existing = tmp_path / "agent-worktree"
+    output = f"worktree {tmp_path / 'source'}\nbranch refs/heads/main\n\nworktree {existing}\nbranch refs/heads/agent/plan\n\n"
+    monkeypatch.setattr(
+        git_utils,
+        "_run_git",
+        lambda *args, **kwargs: subprocess.CompletedProcess(["git"], 0, stdout=output, stderr=""),
+    )
+
+    assert git_utils.find_worktree_for_branch(tmp_path, "agent/plan") == existing.resolve()
