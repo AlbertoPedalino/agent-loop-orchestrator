@@ -1,62 +1,103 @@
 # Claude Loop Orchestrator
 
-A lightweight, external Python orchestrator for running a controlled Claude Code development loop against an existing repository.
-
-The intended workflow is:
+`claude-loop-orchestrator` is a lightweight external control plane for a bounded Claude-assisted repository workflow:
 
 ```text
-task -> planner -> implementer -> tests -> fixer loop -> reviewer -> report
+task -> target validation -> optional worktree -> planner -> implementer
+     -> verification -> fixer loop -> reviewer -> report
 ```
 
-## Current status
+It is designed to keep orchestration policy outside the target repository. It does not commit, push, delete branches, remove worktrees, or modify protected branches.
 
-This repository is a skeleton only. It creates a timestamped run directory, records the task, loads YAML configuration, and displays the planned phases. It does not call Claude Code, edit the target repository, create commits, or run verification commands yet.
+## Architecture
 
-## Requirements
+- `agent/main.py` provides the CLI.
+- `agent/orchestrator.py` owns phase sequencing, run artifacts, verification, and reporting.
+- `agent/claude_runner.py` runs Claude Code safely as `claude -p <prompt>` with an argument list and no shell.
+- `agent/sdk_runner.py` is an optional lazy adapter for the Claude Agent SDK.
+- `agent/hooks.py` provides deterministic pre/post command and phase guardrails.
+- `agent/subagents.py` loads named phase settings from YAML; it does not create recursive SDK subagents.
+- `agent/git_utils.py` creates local-only worktrees and rejects protected agent branch names.
 
-- Python 3.11+
+## Backends
 
-Install the project and development dependencies:
+The default backend is the Claude Code CLI. A normal install does not require the Agent SDK:
 
 ```bash
 python -m pip install -e ".[dev]"
 ```
 
+Install the optional SDK adapter only when needed:
+
+```bash
+python -m pip install -e ".[dev,sdk]"
+```
+
+The SDK is imported only when `--backend sdk` is selected. The adapter intentionally fails clearly if the installed SDK does not expose the supported `query`/`ClaudeAgentOptions` boundary.
+
+## Guardrails and subagents
+
+Blocked command substrings are configured in YAML and are checked before verification execution. Defaults block commits, pushes, W&B sweeps, notebook execution, destructive Docker teardown, and recursive deletion.
+
+`configs/subagents.default.yaml` defines the planner, implementer, fixer, and reviewer. Planner and reviewer are read-only by convention; this version records their allowed-tool configuration but does not yet enforce SDK-native tool permissions for CLI calls.
+
+## Worktree isolation
+
+Set `project.use_worktree` or pass `--use-worktree` to create a new local branch plus linked worktree. The agent branch cannot be `main`, `master`, `develop`, `production`, or `release/*`. Worktree creation fetches only, then uses `git worktree add -b`; it never pushes.
+
 ## Dry run
 
-From this project directory:
+Dry-run writes run metadata under `runs/<timestamp>/` but does not call Claude, run verification commands, create a worktree, or modify the target repository:
 
 ```bash
 python -m agent.main --repo-path . --task "test task" --dry-run
 ```
 
-This writes metadata only under `runs/<timestamp>/`; it does not modify `--repo-path` or invoke Claude.
+Run artifacts are ignored by Git except `runs/.gitkeep`.
 
-Run the tests with:
+## GM-Board example
 
-```bash
-pytest -q
-```
-
-## Configuration
-
-The CLI uses `configs/default.yaml` by default. Pass another file with `--config` to use project-specific limits, verification commands, command blocks, and rules:
+After cloning GM-Board into a separate external workspace and confirming its base branch, use:
 
 ```bash
 python -m agent.main \
-  --repo-path /path/to/project \
-  --task "Describe the requested change" \
-  --config configs/project.example.yaml \
-  --max-fix-attempts 3 \
+  --repo-path ../external/GM-Board \
+  --config configs/gm-board.yaml \
+  --task "Inspect unified character storage and propose a safe plan." \
+  --backend cli \
+  --use-worktree \
+  --base-branch unified-character-storage \
+  --agent-branch agent/apply-orchestrator-unified-character-storage \
   --dry-run
 ```
 
-`configs/project.example.yaml` demonstrates a target-specific configuration. Configuration loading is intentionally simple at this stage: select the file that represents the desired settings.
+To create only the local worktree/branch without invoking Claude, remove `--dry-run` and add `--setup-only`. Review the generated report before running a real planner phase.
+
+## Safety notes
+
+- Do not use this tool to bypass target-repository policy.
+- Review all proposed changes and reports before committing.
+- Do not enable real Claude execution in automated tests.
+- The orchestrator never performs `git commit` or `git push`.
+- Worktrees are never removed automatically in this version.
+
+## Development
+
+```bash
+python -m compileall agent
+pytest -q
+ruff check .
+```
+
+When using the repository virtual environment on Windows:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+```
 
 ## Roadmap
 
-1. CLI wrapper around `claude -p`.
-2. Worktree isolation.
-3. Real planner, implementer, and fixer phases.
-4. Claude Agent SDK integration.
-5. Hooks and subagents.
+1. Enforce allowed tools through stable SDK lifecycle hooks when the SDK contract is finalized.
+2. Add optional plan-only execution as a first-class mode.
+3. Add configurable review gates before verification and branch handoff.
+4. Add optional cleanup policies that require explicit user confirmation.

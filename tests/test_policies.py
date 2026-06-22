@@ -2,7 +2,7 @@
 
 import pytest
 
-from agent.policies import is_command_blocked
+from agent.policies import PolicyError, is_command_blocked, validate_commands_allowed
 
 
 BLOCKED_COMMANDS = [
@@ -36,3 +36,8 @@ def test_command_blocking(command: str, expected: bool) -> None:
 
 def test_empty_blocked_command_is_ignored() -> None:
     assert not is_command_blocked("pytest -q", [""])
+
+
+def test_validate_commands_allowed_rejects_any_blocked_command() -> None:
+    with pytest.raises(PolicyError, match="git commit"):
+        validate_commands_allowed(["pytest -q", "git commit -m unsafe"], BLOCKED_COMMANDS)

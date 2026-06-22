@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 def write_report(
-    run_dir: Path, task: str, status: str, details: dict[str, str]
+    run_dir: Path, task: str, status: str, details: dict[str, str | int]
 ) -> Path:
     """Write and return a simple Markdown report for a run."""
     detail_lines = "\n".join(f"- **{key}**: {value}" for key, value in details.items())

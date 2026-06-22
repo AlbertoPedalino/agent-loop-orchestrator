@@ -1,0 +1,42 @@
+subagents:
+  planner:
+    description: "Read-only planning agent."
+    allowed_tools:
+      - Read
+      - Grep
+      - Glob
+    max_turns: 6
+    prompt_template: prompts/planner.md
+
+  implementer:
+    description: "Code editing agent."
+    allowed_tools:
+      - Read
+      - Edit
+      - MultiEdit
+      - Bash
+      - Grep
+      - Glob
+    max_turns: 12
+    prompt_template: prompts/implementer.md
+
+  fixer:
+    description: "Test failure fixing agent."
+    allowed_tools:
+      - Read
+      - Edit
+      - MultiEdit
+      - Bash
+      - Grep
+      - Glob
+    max_turns: 8
+    prompt_template: prompts/fixer.md
+
+  reviewer:
+    description: "Read-only review agent."
+    allowed_tools:
+      - Read
+      - Grep
+      - Glob
+    max_turns: 6
+    prompt_template: prompts/reviewer.md

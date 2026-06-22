@@ -11,8 +11,8 @@ __pycache__/
 
 # Environment / secrets
 .env
-.env
-!.env
+.env.*
+!.env.example
 
 # IDE
 .idea/
@@ -21,6 +21,10 @@ __pycache__/
 # Orchestrator runtime artifacts
 runs/*
 !runs/.gitkeep
+
+# Local external repos / worktrees
+external/
+agent-worktrees/
 
 # OS
 .DS_Store

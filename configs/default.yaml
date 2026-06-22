@@ -2,15 +2,29 @@ project:
   name: default
   use_worktree: false
 
+backend:
+  type: cli
+
+git:
+  remote: origin
+  base_branch: main
+  branch_prefix: agent/
+  worktree_root: ../agent-worktrees
+  require_clean_repo: false
+  delete_worktree_on_success: false
+  delete_worktree_on_failure: false
+
 limits:
   max_fix_attempts: 3
   max_changed_files: 8
   max_turns_plan: 6
   max_turns_implement: 12
   max_turns_fix: 8
+  max_turns_review: 6
   max_budget_usd: 2.0
 
 verification:
+  timeout_seconds: 120
   commands:
     - pytest -q
 

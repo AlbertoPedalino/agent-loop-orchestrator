@@ -1,0 +1,49 @@
+# GM-Board target settings. Keep verification empty until the cloned repository
+# confirms its package manager and available test scripts.
+project:
+  name: gm-board
+  use_worktree: true
+
+backend:
+  type: cli
+
+git:
+  remote: origin
+  base_branch: unified-character-storage
+  agent_branch: agent/apply-orchestrator-unified-character-storage
+  worktree_root: ../agent-worktrees
+  require_clean_repo: false
+  delete_worktree_on_success: false
+  delete_worktree_on_failure: false
+
+limits:
+  max_fix_attempts: 2
+  max_changed_files: 12
+  max_turns_plan: 6
+  max_turns_implement: 12
+  max_turns_fix: 8
+  max_turns_review: 6
+  max_budget_usd: 2.0
+
+verification:
+  timeout_seconds: 180
+  commands: []
+
+blocked_commands:
+  - git push
+  - git commit
+  - rm -rf
+  - npm publish
+  - pnpm publish
+  - yarn publish
+  - docker compose down -v
+  - jupyter nbconvert --execute
+  - wandb sweep
+  - wandb agent
+
+rules:
+  - Do not push.
+  - Do not commit.
+  - Do not modify protected branches.
+  - Prefer minimal changes.
+  - Prefer project-local tests after confirming package manager configuration.
