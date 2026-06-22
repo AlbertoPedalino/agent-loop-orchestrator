@@ -12,6 +12,7 @@ import yaml
 
 from agent.claude_runner import run_claude_prompt
 from agent.git_utils import (
+    branch_exists,
     create_worktree,
     ensure_git_repo,
     fetch_remote,
@@ -19,6 +20,7 @@ from agent.git_utils import (
     get_git_diff,
     get_git_status,
     is_protected_branch,
+    remote_branch_exists,
 )
 from agent.hooks import post_phase_hook, pre_phase_hook
 from agent.report import write_report
@@ -272,7 +274,11 @@ def run_orchestrator(
         if dry_run:
             print(f"Dry run: would create local worktree for {worktree_note}.")
         else:
-            fetch_remote(resolved_repo_path, selected_remote)
+            base_is_available = branch_exists(
+                resolved_repo_path, selected_base_branch
+            ) or remote_branch_exists(resolved_repo_path, selected_remote, selected_base_branch)
+            if not base_is_available:
+                fetch_remote(resolved_repo_path, selected_remote)
             created_worktree = create_worktree(
                 resolved_repo_path,
                 selected_worktree_root,

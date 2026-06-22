@@ -88,13 +88,15 @@ def branch_exists(path: Path, branch: str) -> bool:
 
 
 def remote_branch_exists(path: Path, remote: str, branch: str) -> bool:
-    """Return whether a remote-tracking or advertised remote branch exists."""
-    local_tracking = _run_git(
+    """Return whether a fetched remote-tracking branch exists locally.
+
+    Call :func:`fetch_remote` explicitly when a fresh network query is required.
+    Keeping this check local makes worktree setup reliable in restricted or
+    offline environments and avoids unexpected remote calls.
+    """
+    result = _run_git(
         path, "show-ref", "--verify", "--quiet", f"refs/remotes/{remote}/{branch}"
     )
-    if local_tracking.returncode == 0:
-        return True
-    result = _run_git(path, "ls-remote", "--exit-code", "--heads", remote, branch, timeout=120)
     return result.returncode == 0
 
 
