@@ -4,6 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
+import yaml
 
 from agent import orchestrator
 from agent.subagents import load_subagents_config
@@ -11,9 +12,23 @@ from agent.subagents import load_subagents_config
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+PROJECT_CONTEXT = {
+    "data_sources": {
+        "data_repo": "https://example.test/data",
+        "image_repo": "https://example.test/images",
+    },
+    "allowed_sources": ["XPHB", "XMM", "XDMG", "FRAIF", "FRHOF", "EFA", "RWH"],
+    "rules": ["Do not vendor externally fetched assets."],
+}
 
-def test_gm_board_project_context_loads_and_formats() -> None:
-    config = orchestrator.load_config(PROJECT_ROOT / "configs" / "gm-board.yaml")
+
+def test_target_project_context_loads_and_formats(tmp_path: Path) -> None:
+    config_path = tmp_path / ".agent-loop" / "config.yaml"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        yaml.safe_dump({"project_context": PROJECT_CONTEXT}), encoding="utf-8"
+    )
+    config = orchestrator.load_config(config_path)
     project_context = orchestrator._resolve_project_context(config)
     formatted = orchestrator._format_project_context(project_context)
 
@@ -27,8 +42,8 @@ def test_gm_board_project_context_loads_and_formats() -> None:
         "RWH",
     ]
     assert "# Persistent Project Context" in formatted
-    assert "5etools-src" in formatted
-    assert "Do not copy, vendor, or commit 5etools JSON files" in formatted
+    assert "example.test/data" in formatted
+    assert "Do not vendor externally fetched assets." in formatted
 
 
 def test_prompt_omits_persistent_section_when_context_is_absent() -> None:
@@ -41,8 +56,7 @@ def test_prompt_omits_persistent_section_when_context_is_absent() -> None:
 
 
 def test_all_phase_prompts_include_project_context() -> None:
-    config = orchestrator.load_config(PROJECT_ROOT / "configs" / "gm-board.yaml")
-    formatted = orchestrator._format_project_context(orchestrator._resolve_project_context(config))
+    formatted = orchestrator._format_project_context(PROJECT_CONTEXT)
     subagents = load_subagents_config(PROJECT_ROOT / "configs" / "subagents.default.yaml")
 
     for phase in ("planner", "implementer", "fixer", "reviewer"):
@@ -54,7 +68,7 @@ def test_all_phase_prompts_include_project_context() -> None:
         )
         assert "# Persistent Project Context" in prompt
         assert "XPHB" in prompt
-        assert "5etools-img" in prompt
+        assert "example.test/images" in prompt
 
 
 def test_dry_run_plan_only_records_project_context(
@@ -78,6 +92,7 @@ def test_dry_run_plan_only_records_project_context(
         repo_path=tmp_path,
         task="specific task",
         config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        config_source="target-local .agent-loop/config.yaml",
         dry_run=True,
         plan_only=True,
     )
@@ -88,6 +103,12 @@ def test_dry_run_plan_only_records_project_context(
         run_dir / "planner_prompt.md"
     ).read_text(encoding="utf-8")
     assert "project_context:" in (run_dir / "config_snapshot.yaml").read_text(encoding="utf-8")
+    assert "target-local .agent-loop/config.yaml" in (
+        run_dir / "config_source.md"
+    ).read_text(encoding="utf-8")
+    assert "target-local .agent-loop/config.yaml" in (
+        run_dir / "report.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_full_pipeline_passes_context_to_every_phase(

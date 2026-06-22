@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 
 from agent.git_utils import is_protected_branch
-from agent.orchestrator import run_orchestrator
+from agent.orchestrator import resolve_config_selection, run_orchestrator
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -22,8 +22,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=Path,
-        default=PROJECT_ROOT / "configs" / "default.yaml",
-        help="YAML configuration file.",
+        help=(
+            "Explicit YAML configuration file. When omitted, discover "
+            ".agent-loop/config.yaml or .agent-loop.yaml in the target repository."
+        ),
     )
     parser.add_argument("--backend", choices=("cli", "sdk"), help="Override configured backend.")
     parser.add_argument("--max-fix-attempts", type=int, help="Override limits.max_fix_attempts.")
@@ -78,10 +80,12 @@ def main() -> int:
 
     try:
         task = _task_from_args(args)
+        config_selection = resolve_config_selection(args.repo_path, args.config)
         result = run_orchestrator(
             repo_path=args.repo_path,
             task=task,
-            config_path=args.config,
+            config_path=config_selection.path,
+            config_source=config_selection.source,
             max_fix_attempts=args.max_fix_attempts,
             dry_run=args.dry_run,
             backend=args.backend,
@@ -100,6 +104,7 @@ def main() -> int:
     print(f"Run directory: {result.run_dir}")
     print(f"Report: {result.report_path}")
     print(f"Status: {result.status}")
+    print(f"Config: {config_selection.path} ({config_selection.source})")
     return 0
 
 

@@ -53,6 +53,46 @@ class OrchestrationResult:
     worktree_path: Path | None = None
 
 
+@dataclass(frozen=True)
+class ConfigSelection:
+    """A resolved configuration path and the way it was selected."""
+
+    path: Path
+    source: str
+
+
+def resolve_config_selection(
+    repo_path: Path,
+    explicit_config_path: Path | None = None,
+    fallback_config_path: Path | None = None,
+) -> ConfigSelection:
+    """Select explicit, target-local, or generic fallback configuration.
+
+    Target-local settings allow the orchestrator to stay project-agnostic while
+    keeping repository rules beside the repository they govern.
+    """
+    if explicit_config_path is not None:
+        return ConfigSelection(
+            path=explicit_config_path.expanduser().resolve(),
+            source="explicit --config",
+        )
+
+    resolved_repo_path = repo_path.expanduser().resolve()
+    for relative_path, source in (
+        (Path(".agent-loop/config.yaml"), "target-local .agent-loop/config.yaml"),
+        (Path(".agent-loop.yaml"), "target-local .agent-loop.yaml"),
+    ):
+        candidate = resolved_repo_path / relative_path
+        if candidate.is_file():
+            return ConfigSelection(path=candidate, source=source)
+
+    default_path = fallback_config_path or Path(__file__).resolve().parent.parent / "configs" / "default.yaml"
+    return ConfigSelection(
+        path=default_path.expanduser().resolve(),
+        source="fallback orchestrator configs/default.yaml",
+    )
+
+
 def load_config(config_path: Path) -> dict[str, Any]:
     """Load a YAML configuration file as a mapping."""
     resolved_path = config_path.expanduser().resolve()
@@ -248,6 +288,7 @@ def run_orchestrator(
     repo_path: Path,
     task: str,
     config_path: Path,
+    config_source: str = "explicit configuration",
     max_fix_attempts: int | None = None,
     dry_run: bool = False,
     backend: str | None = None,
@@ -277,7 +318,8 @@ def run_orchestrator(
     if setup_only and plan_only:
         raise ValueError("plan_only and setup_only cannot be used together")
 
-    config = deepcopy(load_config(config_path))
+    resolved_config_path = config_path.expanduser().resolve()
+    config = deepcopy(load_config(resolved_config_path))
     project_context = _resolve_project_context(config)
     formatted_project_context = _format_project_context(project_context)
     project_config = _mapping(config, "project")
@@ -344,6 +386,12 @@ def run_orchestrator(
     (run_dir / "config_snapshot.yaml").write_text(
         yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
     )
+    _write_markdown(
+        run_dir / "config_source.md",
+        "# Config Source\n\n"
+        f"- **Path**: {resolved_config_path}\n"
+        f"- **Selection**: {config_source}",
+    )
     if formatted_project_context:
         _write_markdown(run_dir / "project_context.md", formatted_project_context)
     _write_markdown(run_dir / "pipeline.md", "# Intended Pipeline\n\n" + "\n".join(
@@ -393,6 +441,8 @@ def run_orchestrator(
 
     details: dict[str, str | int] = {
         "backend": selected_backend,
+        "config path": str(resolved_config_path),
+        "config source": config_source,
         "target repository": str(active_repo_path),
         "starting branch": current_branch,
         "worktree": str(worktree_path) if worktree_path else worktree_note,

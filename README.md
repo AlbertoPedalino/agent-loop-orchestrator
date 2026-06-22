@@ -61,34 +61,46 @@ Use `--plan-only` for the first real Claude interaction with an external reposit
 
 The planner prompt explicitly requires plan-only behavior: no file edits, modification commands, commits, or pushes. With `--use-worktree`, plan-only reuses the selected existing worktree when one is present, otherwise it safely creates the configured local worktree first.
 
-## GM-Board example
+## Target-local configuration
 
-After cloning GM-Board into a separate external workspace and confirming its base branch, use:
+The orchestrator is project-agnostic. Put project-specific branches, verification commands, persistent domain rules, and project context in the target repository—not in this repository.
 
-```bash
-python -m agent.main \
-  --repo-path ../external/GM-Board \
-  --config configs/gm-board.yaml \
-  --task "Inspect unified character storage and propose a safe plan." \
-  --backend cli \
-  --use-worktree \
-  --base-branch unified-character-storage \
-  --agent-branch agent/apply-orchestrator-unified-character-storage \
-  --dry-run
+When `--config` is omitted, configuration is discovered in this order:
+
+1. `<repo-path>/.agent-loop/config.yaml`
+2. `<repo-path>/.agent-loop.yaml`
+3. This repository's generic `configs/default.yaml`
+
+Pass `--config path/to/config.yaml` to override discovery explicitly. Every run records both the selected path and selection method in `config_source.md` and `report.md`.
+
+Example target-local configuration:
+
+```yaml
+project:
+  name: example-project
+  use_worktree: true
+
+verification:
+  timeout_seconds: 120
+  commands:
+    - git diff --check
+
+project_context:
+  rules:
+    - Preserve the target project's documented runtime integrations.
+    - Keep changes in the requested scope.
 ```
 
-To create only the local worktree/branch without invoking Claude, remove `--dry-run` and add `--setup-only`. After reviewing setup output, a safe first real Claude phase is:
+For a target repository with local configuration, no `--config` flag is needed:
 
 ```powershell
 .\.venv\Scripts\python.exe -m agent.main `
   --repo-path ../external/GM-Board `
-  --config configs/gm-board.yaml `
-  --task "Inspect the feature/unified-character-storage branch and produce a safe implementation plan only. Do not modify files." `
+  --task "Improve action tab chip rendering while preserving behavior." `
   --backend cli `
   --use-worktree `
   --base-branch feature/unified-character-storage `
-  --agent-branch agent/apply-orchestrator-feature-unified-character-storage `
-  --plan-only
+  --agent-branch agent/improve-action-chip-rendering
 ```
 
 ## Safety notes
