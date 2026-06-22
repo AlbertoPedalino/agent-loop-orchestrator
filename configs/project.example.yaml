@@ -1,0 +1,27 @@
+# Copy this file and adjust it for the target repository.
+project:
+  name: example-service
+  use_worktree: true
+
+limits:
+  max_fix_attempts: 2
+  max_changed_files: 5
+  max_turns_plan: 4
+  max_turns_implement: 10
+  max_turns_fix: 6
+  max_budget_usd: 1.5
+
+verification:
+  commands:
+    - pytest -q tests/unit
+
+blocked_commands:
+  - git push
+  - git commit
+  - rm -rf
+  - docker compose down -v
+
+rules:
+  - Do not modify production configuration.
+  - Prefer tests under tests/unit.
+  - Keep changes limited to the requested feature.

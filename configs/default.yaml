@@ -1,0 +1,31 @@
+project:
+  name: default
+  use_worktree: false
+
+limits:
+  max_fix_attempts: 3
+  max_changed_files: 8
+  max_turns_plan: 6
+  max_turns_implement: 12
+  max_turns_fix: 8
+  max_budget_usd: 2.0
+
+verification:
+  commands:
+    - pytest -q
+
+blocked_commands:
+  - git push
+  - git commit
+  - rm -rf
+  - wandb sweep
+  - wandb agent
+  - jupyter nbconvert --execute
+  - docker compose down -v
+
+rules:
+  - Do not run long training jobs.
+  - Do not launch W&B sweeps.
+  - Do not execute full notebooks.
+  - Prefer targeted tests.
+  - Prefer minimal changes.
