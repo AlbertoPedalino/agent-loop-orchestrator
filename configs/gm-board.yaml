@@ -1,5 +1,5 @@
-# GM-Board target settings. Keep verification empty until the cloned repository
-# confirms its package manager and available test scripts.
+# GM-Board target settings. The repository has no package manifest or test
+# script, so use Git's read-only whitespace check as a minimal verification guard.
 project:
   name: gm-board
   use_worktree: true
@@ -26,8 +26,9 @@ limits:
   max_budget_usd: 2.0
 
 verification:
-  timeout_seconds: 180
-  commands: []
+  timeout_seconds: 120
+  commands:
+    - git diff --check
 
 blocked_commands:
   - git push
