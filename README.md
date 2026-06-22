@@ -45,6 +45,80 @@ Blocked command substrings are configured in YAML and are checked before verific
 
 Set `project.use_worktree` or pass `--use-worktree` to create a new local branch plus linked worktree. The agent branch cannot be `main`, `master`, `develop`, `production`, or `release/*`. Worktree creation fetches only, then uses `git worktree add -b`; it never pushes.
 
+## In-place agent branch
+
+When you want to run the loop *inside* the target repository instead of a separate worktree, use in-place branch mode. The orchestrator creates or checks out the configured agent branch directly in the current target repository.
+
+Branch placement is controlled by two fields (run file or CLI):
+
+- `branch_mode`: `worktree` | `in_place` | `none`
+  - `worktree` — separate linked worktree (the existing behavior); `use_worktree: true` implies this.
+  - `in_place` — create/checkout the agent branch in the same repository directory.
+  - `none` — run on the current branch without creating a branch (default).
+- `create_branch`: `auto` | `always` | `never`
+  - `auto` (default) — branch only for a full implementation loop; never for `plan_only`, and not for `setup_only` unless requested.
+  - `always` — always create/checkout the agent branch (e.g. to prepare a `setup_only` run).
+  - `never` — never create a branch.
+
+CLI equivalents: `--branch-mode`, `--create-branch`, `--allow-dirty`.
+
+What happens for a full in-place implementation loop:
+
+1. Refuse unless the working tree is clean (override with `allow_dirty: true` / `--allow-dirty`); a dirty branch is never switched away from.
+2. If the agent branch already exists locally, check it out and reuse it.
+3. Otherwise fetch the remote only when the base branch is not already available, then create the agent branch from the base: `git checkout -b agent/<name> <base>`.
+4. Run planner → implementer → verification → fixer → reviewer on that branch.
+
+Safety: the agent branch must be set, must differ from the base branch, and cannot be a protected name (`main`, `master`, `develop`, `production`, `release/*`). The orchestrator never commits, pushes, merges, or deletes branches. The report records the original/resolved repo paths, branch mode, create-branch mode, original branch, base branch, agent branch, whether a branch was created or reused, the final branch, and whether the working tree is dirty at the end.
+
+### Recommended: analysis task (no branch)
+
+```powershell
+cd C:\Users\alber\Documents\DND\GM-Board
+
+C:\Users\alber\Documents\dev\agent-loop-orchestrator\.venv\Scripts\python.exe -m agent.main `
+  --run-file .agent-loop\tasks\inspect-character-builder.yaml
+```
+
+```yaml
+backend: cli
+use_worktree: false
+branch_mode: in_place
+create_branch: auto
+plan_only: true
+
+task: |
+  Inspect the current Character Builder structure.
+  Do not modify files.
+```
+
+With `plan_only: true` and `create_branch: auto` no branch is created or checked out; the planner runs in the current repository and a report is produced.
+
+### Recommended: implementation task (in-place agent branch)
+
+```powershell
+cd C:\Users\alber\Documents\DND\GM-Board
+
+C:\Users\alber\Documents\dev\agent-loop-orchestrator\.venv\Scripts\python.exe -m agent.main `
+  --run-file .agent-loop\tasks\improve-action-chips.yaml
+```
+
+```yaml
+backend: cli
+use_worktree: false
+branch_mode: in_place
+create_branch: auto
+base_branch: feature/unified-character-storage
+agent_branch: agent/improve-action-chips
+plan_only: false
+
+task: |
+  Improve action chip rendering in the Character Builder while preserving existing behavior.
+  Keep the change minimal.
+```
+
+This creates/checks out `agent/improve-action-chips` from `feature/unified-character-storage` in the same repository directory, runs the full loop on it, and reports the final branch and diff status.
+
 ## Dry run
 
 Dry-run writes run metadata under `runs/<timestamp>/` but does not call Claude, run verification commands, create a worktree, or modify the target repository:
@@ -161,7 +235,10 @@ three sources it came from (`run_source.md` and `report.md`).
 repo_path: string | null # optional; defaults to --repo-path or the working dir
 config: string | null    # optional; omit to keep target-local config discovery
 backend: cli | sdk       # defaults to cli
-use_worktree: boolean    # defaults to false
+use_worktree: boolean    # defaults to false; true implies branch_mode: worktree
+branch_mode: worktree | in_place | none  # optional; see "In-place agent branch"
+create_branch: auto | always | never     # optional; defaults to auto
+allow_dirty: boolean     # defaults to false; permit switching with a dirty tree
 base_branch: string | null
 agent_branch: string | null
 plan_only: boolean       # defaults to false
@@ -187,7 +264,8 @@ behavior of passing the same paths directly on the command line.
 
 `--run-file` is mutually exclusive with every other run-parameter flag
 (`--task`, `--task-file`, `--config`, `--backend`, `--use-worktree`,
-`--base-branch`, `--agent-branch`, `--remote`, `--worktree-root`,
+`--branch-mode`, `--create-branch`, `--allow-dirty`, `--base-branch`,
+`--agent-branch`, `--remote`, `--worktree-root`,
 `--max-fix-attempts`, `--plan-only`, `--setup-only`, `--dry-run`). The only
 supported override is `--repo-path`, which takes precedence over the run file's
 `repo_path`. Combining any other flag fails clearly so the source of each

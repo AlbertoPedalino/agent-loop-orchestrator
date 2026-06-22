@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 import subprocess
 
@@ -181,3 +182,80 @@ def create_worktree(
     )
     _git_output_or_error(result, "worktree creation")
     return worktree_path
+
+
+@dataclass(frozen=True)
+class InPlaceBranchResult:
+    """Outcome of checking out an agent branch inside the target repository."""
+
+    final_branch: str
+    created: bool
+    reused: bool
+
+
+def checkout_branch(path: Path, branch_name: str) -> str:
+    """Check out an existing local branch in place."""
+    result = _run_git(path, "checkout", branch_name, timeout=120)
+    return _git_output_or_error(result, f"checkout '{branch_name}'")
+
+
+def create_and_checkout_branch(path: Path, branch_name: str, base_ref: str) -> str:
+    """Create a new branch from *base_ref* and check it out in place."""
+    result = _run_git(path, "checkout", "-b", branch_name, base_ref, timeout=120)
+    return _git_output_or_error(result, f"branch creation '{branch_name}'")
+
+
+def checkout_in_place_agent_branch(
+    repo_path: Path,
+    agent_branch: str,
+    base_branch: str,
+    remote: str = "origin",
+    allow_dirty: bool = False,
+) -> InPlaceBranchResult:
+    """Create or reuse an agent branch directly in the target repository.
+
+    Unlike :func:`create_worktree`, this switches branches in the same working
+    directory. It never pushes, commits, merges, or touches a protected branch.
+    It refuses to switch away from a dirty working tree unless *allow_dirty* is
+    set, so uncommitted work is never silently abandoned.
+    """
+    resolved_repo_path = repo_path.expanduser().resolve()
+    if not ensure_git_repo(resolved_repo_path):
+        raise GitOperationError(f"Not a Git repository: {resolved_repo_path}")
+    if not agent_branch.strip():
+        raise ValueError("Agent branch name must not be empty")
+    if is_protected_branch(agent_branch):
+        raise ValueError(f"Refusing to use protected agent branch: {agent_branch}")
+    if not base_branch or not base_branch.strip():
+        raise ValueError("A base branch is required for in-place branch mode")
+    if agent_branch.strip() == base_branch.strip():
+        raise ValueError("Agent branch must differ from the base branch")
+
+    if get_git_status(resolved_repo_path).strip() and not allow_dirty:
+        raise GitOperationError(
+            "Working tree is dirty; refusing to switch branches. Commit or stash "
+            "changes, or allow a dirty repository explicitly."
+        )
+
+    if branch_exists(resolved_repo_path, agent_branch):
+        checkout_branch(resolved_repo_path, agent_branch)
+        return InPlaceBranchResult(agent_branch, created=False, reused=True)
+
+    base_local = branch_exists(resolved_repo_path, base_branch)
+    base_remote = remote_branch_exists(resolved_repo_path, remote, base_branch)
+    if not base_local and not base_remote:
+        fetch_remote(resolved_repo_path, remote)
+        base_local = branch_exists(resolved_repo_path, base_branch)
+        base_remote = remote_branch_exists(resolved_repo_path, remote, base_branch)
+
+    if base_local:
+        base_ref = base_branch
+    elif base_remote:
+        base_ref = f"{remote}/{base_branch}"
+    else:
+        raise GitOperationError(
+            f"Base branch '{base_branch}' does not exist locally or on remote '{remote}'"
+        )
+
+    create_and_checkout_branch(resolved_repo_path, agent_branch, base_ref)
+    return InPlaceBranchResult(agent_branch, created=True, reused=False)

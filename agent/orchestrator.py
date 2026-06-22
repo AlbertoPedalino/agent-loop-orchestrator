@@ -13,6 +13,7 @@ import yaml
 from agent.claude_runner import run_claude_prompt
 from agent.git_utils import (
     branch_exists,
+    checkout_in_place_agent_branch,
     create_worktree,
     ensure_git_repo,
     fetch_remote,
@@ -283,6 +284,45 @@ def _resolve_or_create_worktree(
     )
 
 
+def _resolve_branch_mode(branch_mode: str | None, use_worktree: bool) -> tuple[str, bool]:
+    """Resolve the effective branch mode and whether a worktree is used.
+
+    ``use_worktree: true`` implies ``branch_mode: worktree`` and takes precedence,
+    so an explicit worktree request is never silently downgraded. ``branch_mode:
+    worktree`` likewise turns the worktree path on.
+    """
+    if branch_mode is not None and branch_mode not in {"worktree", "in_place", "none"}:
+        raise ValueError("branch_mode must be 'worktree', 'in_place', or 'none'")
+    if use_worktree or branch_mode == "worktree":
+        return "worktree", True
+    return (branch_mode or "none"), False
+
+
+def _wants_in_place_branch(create_branch: str, plan_only: bool, setup_only: bool) -> bool:
+    """Decide whether an in-place run should create/checkout the agent branch.
+
+    Plan-only never creates a branch. ``create_branch: never`` never creates one;
+    ``always`` always does. Under ``auto`` a setup-only run does not create a
+    branch (it must be requested explicitly), while a full loop does.
+    """
+    if plan_only:
+        return False
+    if create_branch == "never":
+        return False
+    if create_branch == "always":
+        return True
+    return not setup_only
+
+
+def _finalize_git_details(details: dict[str, str | int], repo_path: Path) -> None:
+    """Record the final branch and end-of-run dirty state on every report path."""
+    try:
+        details["final branch"] = get_current_branch(repo_path)
+    except Exception:  # noqa: BLE001 - reporting must never mask the real outcome
+        details["final branch"] = "unknown"
+    details["working tree dirty at end"] = "yes" if get_git_status(repo_path).strip() else "no"
+
+
 def run_orchestrator(
     *,
     repo_path: Path,
@@ -293,6 +333,9 @@ def run_orchestrator(
     dry_run: bool = False,
     backend: str | None = None,
     use_worktree: bool | None = None,
+    branch_mode: str | None = None,
+    create_branch: str | None = None,
+    allow_dirty: bool | None = None,
     worktree_root: Path | None = None,
     base_branch: str | None = None,
     agent_branch: str | None = None,
@@ -344,8 +387,21 @@ def run_orchestrator(
     selected_use_worktree = (
         use_worktree if use_worktree is not None else bool(project_config.get("use_worktree", False))
     )
+    requested_branch_mode = branch_mode or git_config.get("branch_mode")
+    selected_branch_mode, selected_use_worktree = _resolve_branch_mode(
+        requested_branch_mode, selected_use_worktree
+    )
+    selected_create_branch = create_branch or git_config.get("create_branch") or "auto"
+    if selected_create_branch not in {"auto", "always", "never"}:
+        raise ValueError("create_branch must be 'auto', 'always', or 'never'")
+    selected_allow_dirty = (
+        allow_dirty if allow_dirty is not None else bool(git_config.get("allow_dirty", False))
+    )
     selected_base_branch = base_branch or git_config.get("base_branch")
     selected_agent_branch = agent_branch or git_config.get("agent_branch")
+    wants_in_place_branch = selected_branch_mode == "in_place" and _wants_in_place_branch(
+        selected_create_branch, plan_only, setup_only
+    )
     if selected_use_worktree:
         if not isinstance(selected_base_branch, str) or not selected_base_branch.strip():
             raise ValueError("A base branch is required when using a worktree")
@@ -353,6 +409,15 @@ def run_orchestrator(
             raise ValueError("An agent branch is required when using a worktree")
         if is_protected_branch(selected_agent_branch):
             raise ValueError(f"Refusing protected agent branch: {selected_agent_branch}")
+    if wants_in_place_branch:
+        if not isinstance(selected_agent_branch, str) or not selected_agent_branch.strip():
+            raise ValueError("An agent branch is required for an in-place implementation loop")
+        if not isinstance(selected_base_branch, str) or not selected_base_branch.strip():
+            raise ValueError("A base branch is required for an in-place implementation loop")
+        if is_protected_branch(selected_agent_branch):
+            raise ValueError(f"Refusing protected agent branch: {selected_agent_branch}")
+        if selected_agent_branch.strip() == selected_base_branch.strip():
+            raise ValueError("Agent branch must differ from the base branch")
     if bool(git_config.get("require_clean_repo", False)) and get_git_status(resolved_repo_path).strip():
         raise ValueError("Target repository must be clean according to git.require_clean_repo")
 
@@ -414,6 +479,10 @@ def run_orchestrator(
     active_repo_path = resolved_repo_path
     worktree_path: Path | None = None
     current_branch = get_current_branch(resolved_repo_path)
+    original_branch = current_branch
+    branch_created = False
+    branch_reused = False
+    in_place_note = "not requested"
     worktree_note = "not requested"
     if selected_use_worktree:
         raw_worktree_root = worktree_root or git_config.get("worktree_root", "../agent-worktrees")
@@ -443,6 +512,25 @@ def run_orchestrator(
                 worktree_note = f"using existing worktree at {worktree_path}"
             active_repo_path = worktree_path
             current_branch = get_current_branch(active_repo_path)
+    elif wants_in_place_branch:
+        in_place_note = f"branch {selected_agent_branch} from {selected_base_branch} (in place)"
+        if dry_run:
+            print(f"Dry run: would create/checkout in-place {in_place_note}.")
+        else:
+            branch_result = checkout_in_place_agent_branch(
+                resolved_repo_path,
+                selected_agent_branch,
+                selected_base_branch,
+                remote=selected_remote,
+                allow_dirty=selected_allow_dirty,
+            )
+            branch_created = branch_result.created
+            branch_reused = branch_result.reused
+            current_branch = get_current_branch(resolved_repo_path)
+            in_place_note = (
+                f"{'created' if branch_created else 'reused'} branch "
+                f"{branch_result.final_branch} in {resolved_repo_path}"
+            )
 
     print("Prepared orchestration pipeline:")
     for index, step in enumerate(PIPELINE_STEPS, start=1):
@@ -456,11 +544,20 @@ def run_orchestrator(
         "backend": selected_backend,
         "launched from": launched_from,
         "run file": str(run_file_path) if run_file_path is not None else "not used",
+        "original repo path": str(repo_path),
         "resolved repo path": str(resolved_repo_path),
         "repo path source": repo_path_source,
         "config path": str(resolved_config_path),
         "config source": config_source,
         "target repository": str(active_repo_path),
+        "branch mode": selected_branch_mode,
+        "create branch mode": selected_create_branch,
+        "original branch": original_branch,
+        "base branch": selected_base_branch if selected_base_branch else "not set",
+        "agent branch": selected_agent_branch if selected_agent_branch else "not set",
+        "branch created": "yes" if branch_created else "no",
+        "branch reused": "yes" if branch_reused else "no",
+        "in-place branch": in_place_note,
         "starting branch": current_branch,
         "worktree": str(worktree_path) if worktree_path else worktree_note,
         "verification": "not run",
@@ -473,6 +570,7 @@ def run_orchestrator(
         if setup_only:
             status = "dry-run-setup" if dry_run else "setup-complete"
             details["next steps"] = "Run a planner phase separately; no Claude phase was invoked."
+            _finalize_git_details(details, active_repo_path)
             report_path = write_report(run_dir, task, status, details)
             return OrchestrationResult(
                 run_dir, report_path, status, active_repo_path, worktree_path
@@ -538,6 +636,7 @@ def run_orchestrator(
                 details["risks"] = "Planner output is advisory; review it before any implementation."
                 details["next steps"] = "Review planner_output.md before allowing implementation."
                 status = "plan-only-complete"
+                _finalize_git_details(details, active_repo_path)
                 report_path = write_report(run_dir, task, status, details)
                 return OrchestrationResult(
                     run_dir, report_path, status, active_repo_path, worktree_path
@@ -638,9 +737,11 @@ def run_orchestrator(
             )
             status = "completed" if passed else "verification-failed"
 
+        _finalize_git_details(details, active_repo_path)
         report_path = write_report(run_dir, task, status, details)
         return OrchestrationResult(run_dir, report_path, status, active_repo_path, worktree_path)
     except Exception as error:
         details["failure"] = str(error)
+        _finalize_git_details(details, active_repo_path)
         write_report(run_dir, task, "failed", details)
         raise

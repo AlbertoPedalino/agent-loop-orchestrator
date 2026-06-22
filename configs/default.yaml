@@ -9,6 +9,9 @@ git:
   remote: origin
   base_branch: main
   branch_prefix: agent/
+  branch_mode: none          # worktree | in_place | none
+  create_branch: auto        # auto | always | never (in-place only)
+  allow_dirty: false         # permit switching branches with a dirty work tree
   worktree_root: ../agent-worktrees
   require_clean_repo: false
   delete_worktree_on_success: false

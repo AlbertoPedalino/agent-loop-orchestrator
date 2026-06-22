@@ -50,6 +50,29 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Create an isolated local worktree (disabled in dry-run).",
     )
+    parser.add_argument(
+        "--branch-mode",
+        choices=("worktree", "in_place", "none"),
+        help=(
+            "How to place the agent branch: 'worktree' (separate linked worktree), "
+            "'in_place' (agent branch in the current target repo), or 'none' (run on "
+            "the current branch without creating one)."
+        ),
+    )
+    parser.add_argument(
+        "--create-branch",
+        choices=("auto", "always", "never"),
+        help=(
+            "When in-place branch mode creates the agent branch: 'auto' (only for a "
+            "full implementation loop), 'always', or 'never'."
+        ),
+    )
+    parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        default=None,
+        help="Permit switching branches when the working tree is dirty.",
+    )
     parser.add_argument("--worktree-root", type=Path, help="Directory for local worktrees.")
     parser.add_argument("--base-branch", help="Base branch for a new worktree branch.")
     parser.add_argument("--agent-branch", help="New local agent branch for the worktree.")
@@ -84,6 +107,9 @@ class _RunInvocation:
     config_path: Path | None
     backend: str | None
     use_worktree: bool | None
+    branch_mode: str | None
+    create_branch: str | None
+    allow_dirty: bool | None
     base_branch: str | None
     agent_branch: str | None
     plan_only: bool
@@ -119,6 +145,9 @@ def _conflicting_run_file_flags(args: argparse.Namespace) -> list[str]:
         ("--config", args.config),
         ("--backend", args.backend),
         ("--use-worktree", args.use_worktree),
+        ("--branch-mode", args.branch_mode),
+        ("--create-branch", args.create_branch),
+        ("--allow-dirty", args.allow_dirty),
         ("--base-branch", args.base_branch),
         ("--agent-branch", args.agent_branch),
         ("--remote", args.remote),
@@ -167,6 +196,9 @@ def _resolve_run_invocation(args: argparse.Namespace, parser: argparse.ArgumentP
             config_path=run.config,
             backend=run.backend,
             use_worktree=run.use_worktree,
+            branch_mode=run.branch_mode,
+            create_branch=run.create_branch,
+            allow_dirty=run.allow_dirty,
             base_branch=run.base_branch,
             agent_branch=run.agent_branch,
             plan_only=run.plan_only,
@@ -190,6 +222,9 @@ def _resolve_run_invocation(args: argparse.Namespace, parser: argparse.ArgumentP
         config_path=args.config,
         backend=args.backend,
         use_worktree=args.use_worktree,
+        branch_mode=args.branch_mode,
+        create_branch=args.create_branch,
+        allow_dirty=args.allow_dirty,
         base_branch=args.base_branch,
         agent_branch=args.agent_branch,
         plan_only=args.plan_only,
@@ -224,6 +259,9 @@ def main() -> int:
             dry_run=invocation.dry_run,
             backend=invocation.backend,
             use_worktree=invocation.use_worktree,
+            branch_mode=invocation.branch_mode,
+            create_branch=invocation.create_branch,
+            allow_dirty=invocation.allow_dirty,
             worktree_root=invocation.worktree_root,
             base_branch=invocation.base_branch,
             agent_branch=invocation.agent_branch,

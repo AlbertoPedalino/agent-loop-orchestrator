@@ -18,13 +18,18 @@ from pathlib import Path
 import yaml
 
 
-_BOOLEAN_FIELDS = ("use_worktree", "plan_only", "setup_only", "dry_run")
+_BOOLEAN_FIELDS = ("use_worktree", "plan_only", "setup_only", "dry_run", "allow_dirty")
+_BRANCH_MODES = ("worktree", "in_place", "none")
+_CREATE_BRANCH_MODES = ("auto", "always", "never")
 _KNOWN_FIELDS = frozenset(
     {
         "repo_path",
         "config",
         "backend",
         "use_worktree",
+        "branch_mode",
+        "create_branch",
+        "allow_dirty",
         "base_branch",
         "agent_branch",
         "plan_only",
@@ -44,6 +49,9 @@ class RunFileConfig:
     config: Path | None
     backend: str
     use_worktree: bool
+    branch_mode: str | None
+    create_branch: str | None
+    allow_dirty: bool
     base_branch: str | None
     agent_branch: str | None
     plan_only: bool
@@ -117,6 +125,15 @@ def load_run_file(path: Path) -> RunFileConfig:
             raise ValueError(f"Run file '{field}' must be a boolean")
         booleans[field] = value
 
+    branch_mode_value = _optional_string(data, "branch_mode")
+    if branch_mode_value is not None and branch_mode_value not in _BRANCH_MODES:
+        raise ValueError(f"Run file 'branch_mode' must be one of: {', '.join(_BRANCH_MODES)}")
+    create_branch_value = _optional_string(data, "create_branch")
+    if create_branch_value is not None and create_branch_value not in _CREATE_BRANCH_MODES:
+        raise ValueError(
+            f"Run file 'create_branch' must be one of: {', '.join(_CREATE_BRANCH_MODES)}"
+        )
+
     config_value = _optional_string(data, "config")
     base_branch_value = _optional_string(data, "base_branch")
     agent_branch_value = _optional_string(data, "agent_branch")
@@ -126,6 +143,9 @@ def load_run_file(path: Path) -> RunFileConfig:
         config=_resolve_path(config_value) if config_value else None,
         backend=backend_value,
         use_worktree=booleans["use_worktree"],
+        branch_mode=branch_mode_value,
+        create_branch=create_branch_value,
+        allow_dirty=booleans["allow_dirty"],
         base_branch=base_branch_value,
         agent_branch=agent_branch_value,
         plan_only=booleans["plan_only"],
