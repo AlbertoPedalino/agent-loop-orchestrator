@@ -4,6 +4,28 @@ project:
   name: gm-board
   use_worktree: true
 
+project_context:
+  data_sources:
+    data_repo: "https://github.com/5etools-mirror-3/5etools-src/tree/main/data"
+    image_repo: "https://github.com/5etools-mirror-2/5etools-img"
+  allowed_sources:
+    - XPHB
+    - XMM
+    - XDMG
+    - FRAIF
+    - FRHOF
+    - EFA
+    - RWH
+  rules:
+    - "GM-Board fetches D&D data at runtime from the configured 5etools data repository."
+    - "GM-Board resolves images/assets from the configured 5etools image repository."
+    - "Only D&D 5.5e / 2024 source codes are allowed: XPHB, XMM, XDMG, FRAIF, FRHOF, EFA, RWH."
+    - "Ignore or reject any source outside the whitelist."
+    - "Do not use legacy 2014 sources such as PHB, DMG, MM unless explicitly mapped to an allowed 2024 source code."
+    - "Do not use homebrew, unofficial sources, or non-whitelisted sources."
+    - "Do not copy, vendor, or commit 5etools JSON files or image assets into GM-Board."
+    - "Preserve runtime fetching behavior; do not replace it with local vendored copies."
+
 backend:
   type: cli
 

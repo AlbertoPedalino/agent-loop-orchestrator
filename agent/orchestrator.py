@@ -92,7 +92,53 @@ def _write_verification(path: Path, results: dict[str, str]) -> None:
     _write_markdown(path, "\n\n".join(sections))
 
 
-def _read_prompt(subagent: SubagentConfig, task: str, repo_path: Path, context: str = "") -> str:
+def _resolve_project_context(config: dict[str, Any]) -> dict[str, Any]:
+    """Return an optional project context mapping with basic shape validation."""
+    project_context = config.get("project_context")
+    if project_context is None:
+        return {}
+    if not isinstance(project_context, dict):
+        raise ValueError("Configuration project_context must be a YAML mapping")
+    for key in ("data_sources", "allowed_sources", "rules"):
+        if key not in project_context:
+            continue
+        value = project_context[key]
+        if key == "data_sources" and not isinstance(value, dict):
+            raise ValueError("project_context.data_sources must be a YAML mapping")
+        if key in {"allowed_sources", "rules"} and (
+            not isinstance(value, list) or not all(isinstance(item, str) for item in value)
+        ):
+            raise ValueError(f"project_context.{key} must be a list of strings")
+    return project_context
+
+
+def _format_project_context(project_context: dict[str, Any]) -> str:
+    """Format optional project rules as a stable, readable prompt section."""
+    if not project_context:
+        return ""
+
+    lines = ["# Persistent Project Context", "", "These rules apply to every task for this project:"]
+    data_sources = project_context.get("data_sources", {})
+    if data_sources:
+        lines.extend(["", "## Data Sources"])
+        lines.extend(f"- **{key}**: {value}" for key, value in data_sources.items())
+    allowed_sources = project_context.get("allowed_sources", [])
+    if allowed_sources:
+        lines.extend(["", "## Allowed Source Codes", "", f"- {', '.join(allowed_sources)}"])
+    rules = project_context.get("rules", [])
+    if rules:
+        lines.extend(["", "## Rules"])
+        lines.extend(f"- {rule}" for rule in rules)
+    return "\n".join(lines)
+
+
+def _read_prompt(
+    subagent: SubagentConfig,
+    task: str,
+    repo_path: Path,
+    context: str = "",
+    project_context: str = "",
+) -> str:
     template = subagent.prompt_template.read_text(encoding="utf-8").strip()
     return (
         f"{template}\n\n"
@@ -100,7 +146,8 @@ def _read_prompt(subagent: SubagentConfig, task: str, repo_path: Path, context: 
         f"Phase: {subagent.name}\n"
         f"Repository: {repo_path}\n\n"
         f"Task:\n{task.strip()}\n"
-        "\nSafety constraints: do not commit, push, switch to a protected branch, "
+        + (f"\n{project_context.strip()}\n" if project_context.strip() else "")
+        + "\nSafety constraints: do not commit, push, switch to a protected branch, "
         "run blocked commands, or change files outside the requested scope.\n"
         + (f"\n{context.strip()}\n" if context.strip() else "")
     )
@@ -231,6 +278,8 @@ def run_orchestrator(
         raise ValueError("plan_only and setup_only cannot be used together")
 
     config = deepcopy(load_config(config_path))
+    project_context = _resolve_project_context(config)
+    formatted_project_context = _format_project_context(project_context)
     project_config = _mapping(config, "project")
     backend_config = _mapping(config, "backend")
     git_config = _mapping(config, "git")
@@ -295,6 +344,8 @@ def run_orchestrator(
     (run_dir / "config_snapshot.yaml").write_text(
         yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
     )
+    if formatted_project_context:
+        _write_markdown(run_dir / "project_context.md", formatted_project_context)
     _write_markdown(run_dir / "pipeline.md", "# Intended Pipeline\n\n" + "\n".join(
         f"{index}. {step}" for index, step in enumerate(PIPELINE_STEPS, start=1)
     ))
@@ -363,7 +414,12 @@ def run_orchestrator(
         if dry_run:
             _write_markdown(run_dir / "planner_output.md", _dry_run_output("planner"))
             if plan_only:
-                planner_prompt = _read_prompt(subagents["planner"], task, active_repo_path)
+                planner_prompt = _read_prompt(
+                    subagents["planner"],
+                    task,
+                    active_repo_path,
+                    project_context=formatted_project_context,
+                )
                 _write_markdown(run_dir / "planner_prompt.md", planner_prompt)
                 dry_run_status = get_git_status(active_repo_path)
                 dry_run_diff = get_git_diff(active_repo_path)
@@ -385,7 +441,12 @@ def run_orchestrator(
             details["mode"] = "plan-only" if plan_only else "full-pipeline"
             status = "dry-run-plan-only" if plan_only else "dry-run"
         else:
-            planner_prompt = _read_prompt(subagents["planner"], task, active_repo_path)
+            planner_prompt = _read_prompt(
+                subagents["planner"],
+                task,
+                active_repo_path,
+                project_context=formatted_project_context,
+            )
             _write_markdown(run_dir / "planner_prompt.md", planner_prompt)
             planner_output = _run_phase(
                 phase="planner",
@@ -418,7 +479,11 @@ def run_orchestrator(
             implementer_output = _run_phase(
                 phase="implementer",
                 prompt=_read_prompt(
-                    subagents["implementer"], task, active_repo_path, f"## Planner Output\n\n{planner_output}"
+                    subagents["implementer"],
+                    task,
+                    active_repo_path,
+                    f"## Planner Output\n\n{planner_output}",
+                    formatted_project_context,
                 ),
                 task=task,
                 repo_path=active_repo_path,
@@ -457,6 +522,7 @@ def run_orchestrator(
                         "## Planner Output\n\n"
                         f"{planner_output}\n\n## Current Diff\n\n{get_git_diff(active_repo_path)}\n\n"
                         f"## Verification Attempt {fix_attempts}\n\n{verification_context}",
+                        formatted_project_context,
                     ),
                     task=task,
                     repo_path=active_repo_path,
@@ -483,6 +549,7 @@ def run_orchestrator(
                     active_repo_path,
                     f"## Final Diff\n\n{final_diff}\n\n"
                     f"## Verification Status\n\n{'passed' if passed else 'failed after fix limit'}",
+                    formatted_project_context,
                 ),
                 task=task,
                 repo_path=active_repo_path,
