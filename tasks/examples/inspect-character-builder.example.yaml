@@ -1,0 +1,44 @@
+# Example run file for the agent-loop-orchestrator.
+#
+# This is an EXAMPLE, not a required project config. Copy it to your own task
+# folder (for example tasks/<project>/<task>.yaml), adjust the paths/branches,
+# and launch it with:
+#
+#   .\.venv\Scripts\python.exe -m agent.main --run-file tasks/<project>/<task>.yaml
+#
+# Relative paths below are resolved against the current working directory from
+# which the command is launched (the orchestrator repo root in these docs),
+# exactly as if they were passed directly on the command line.
+#
+# repo_path is OPTIONAL. The recommended workflow is to drop it, place this file
+# at <target-repo>/.agent-loop/tasks/<task>.yaml, then launch from inside the
+# target repo so repo_path defaults to the current working directory:
+#
+#   cd <target-repo>
+#   <orchestrator>/.venv/Scripts/python.exe -m agent.main \
+#     --run-file .agent-loop/tasks/<task>.yaml
+#
+# The repo_path below is kept only to show the explicit-path variant.
+
+repo_path: ../external/GM-Board
+backend: cli
+use_worktree: true
+base_branch: feature/unified-character-storage
+agent_branch: agent/inspect-character-builder-structure
+plan_only: true
+
+task: |
+  Inspect the current Character Builder structure in GM-Board.
+
+  Goal:
+  Understand how the character builder is organized, including:
+  - main entry points;
+  - data loading;
+  - state/storage;
+  - UI components;
+  - action tab;
+  - character sheet;
+  - source filtering / D&D 2024 rules integration.
+
+  Do not modify files.
+  Produce a clear architectural report with relevant files and responsibilities.
