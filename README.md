@@ -103,6 +103,127 @@ For a target repository with local configuration, no `--config` flag is needed:
   --agent-branch agent/improve-action-chip-rendering
 ```
 
+## Run files
+
+For repeated agent loops the command line becomes long. A run file is a small
+YAML document that captures every parameter for one run, so it can be launched
+with a single short command:
+
+```powershell
+.\.venv\Scripts\python.exe -m agent.main --run-file tasks/examples/inspect-character-builder.example.yaml
+```
+
+A tracked example lives at `tasks/examples/inspect-character-builder.example.yaml`.
+It is an example, not a required project config—copy it to your own task folder
+(for example `tasks/gm-board/inspect-character-builder.yaml`) and adjust it:
+
+```powershell
+.\.venv\Scripts\python.exe -m agent.main --run-file tasks/gm-board/inspect-character-builder.yaml
+```
+
+### Recommended: launch from inside the target repository
+
+`repo_path` is optional. The recommended workflow is to keep the run file inside
+the target repository next to its `.agent-loop/config.yaml`, then launch from the
+target repository so `repo_path` defaults to the current working directory and
+target-local config discovery finds `.agent-loop/config.yaml` automatically:
+
+```text
+GM-Board/
+└── .agent-loop/
+    ├── config.yaml
+    └── tasks/
+        └── inspect-character-builder.yaml
+```
+
+```powershell
+cd C:\Users\alber\Documents\dev\external\GM-Board
+
+C:\Users\alber\Documents\dev\agent-loop-orchestrator\.venv\Scripts\python.exe -m agent.main `
+  --run-file .agent-loop\tasks\inspect-character-builder.yaml
+```
+
+With this layout the run file omits `repo_path` entirely and only describes the
+task and run parameters.
+
+The target repository is resolved in this order:
+
+1. an explicit `--repo-path` (the one supported CLI override of a run file);
+2. the run file's `repo_path`, when present;
+3. otherwise the current working directory.
+
+Each run records the run-file path, the resolved repo path, and which of these
+three sources it came from (`run_source.md` and `report.md`).
+
+### Supported fields
+
+```yaml
+repo_path: string | null # optional; defaults to --repo-path or the working dir
+config: string | null    # optional; omit to keep target-local config discovery
+backend: cli | sdk       # defaults to cli
+use_worktree: boolean    # defaults to false
+base_branch: string | null
+agent_branch: string | null
+plan_only: boolean       # defaults to false
+setup_only: boolean      # defaults to false
+dry_run: boolean         # defaults to false
+task: string             # either task or task_file is required (mutually exclusive)
+task_file: string | null
+```
+
+Rules: `repo_path` is optional (see the resolution order above); exactly one of
+`task` or `task_file` is required; booleans default to `false`; `backend` defaults
+to `cli`. When `config` is omitted, the usual target-local discovery applies
+(`.agent-loop/config.yaml`, then `.agent-loop.yaml`, then the generic fallback).
+
+### Path handling
+
+The `--run-file` path and any relative paths inside a run file (`repo_path`,
+`config`, `task_file`) are resolved **relative to the current working directory
+from which the command is launched** unless they are absolute. This matches the
+behavior of passing the same paths directly on the command line.
+
+### Exclusivity
+
+`--run-file` is mutually exclusive with every other run-parameter flag
+(`--task`, `--task-file`, `--config`, `--backend`, `--use-worktree`,
+`--base-branch`, `--agent-branch`, `--remote`, `--worktree-root`,
+`--max-fix-attempts`, `--plan-only`, `--setup-only`, `--dry-run`). The only
+supported override is `--repo-path`, which takes precedence over the run file's
+`repo_path`. Combining any other flag fails clearly so the source of each
+parameter stays unambiguous. To dry-run or plan-only a run file, set `dry_run` or
+`plan_only` inside the file. Each run records its source (`run-file` or
+`cli-args`), the resolved repo path, the repo-path source, and the run-file path
+in `run_source.md` and `report.md`.
+
+### Example: plan-only analysis
+
+```yaml
+repo_path: ../external/GM-Board
+backend: cli
+use_worktree: true
+base_branch: feature/unified-character-storage
+agent_branch: agent/inspect-character-builder-structure
+plan_only: true
+
+task: |
+  Inspect the current Character Builder structure in GM-Board.
+  Do not modify files. Produce a clear architectural report.
+```
+
+### Example: full implementation loop
+
+```yaml
+repo_path: ../external/GM-Board
+backend: cli
+use_worktree: true
+base_branch: feature/unified-character-storage
+agent_branch: agent/improve-action-chip-rendering
+
+task: |
+  Improve action tab chip rendering while preserving behavior.
+```
+
 ## Safety notes
 
 - Do not use this tool to bypass target-repository policy.

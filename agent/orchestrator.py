@@ -300,6 +300,9 @@ def run_orchestrator(
     subagents_config_path: Path | None = None,
     setup_only: bool = False,
     plan_only: bool = False,
+    run_file_path: Path | None = None,
+    launched_from: str = "cli-args",
+    repo_path_source: str = "cli --repo-path",
 ) -> OrchestrationResult:
     """Run the safe orchestration loop, or simulate it in ``dry_run`` mode.
 
@@ -392,6 +395,16 @@ def run_orchestrator(
         f"- **Path**: {resolved_config_path}\n"
         f"- **Selection**: {config_source}",
     )
+    run_source_lines = [
+        "# Run Source",
+        "",
+        f"- **Launched from**: {launched_from}",
+        f"- **Resolved repo path**: {resolved_repo_path}",
+        f"- **Repo path source**: {repo_path_source}",
+    ]
+    if run_file_path is not None:
+        run_source_lines.append(f"- **Run file**: {run_file_path}")
+    _write_markdown(run_dir / "run_source.md", "\n".join(run_source_lines))
     if formatted_project_context:
         _write_markdown(run_dir / "project_context.md", formatted_project_context)
     _write_markdown(run_dir / "pipeline.md", "# Intended Pipeline\n\n" + "\n".join(
@@ -441,6 +454,10 @@ def run_orchestrator(
 
     details: dict[str, str | int] = {
         "backend": selected_backend,
+        "launched from": launched_from,
+        "run file": str(run_file_path) if run_file_path is not None else "not used",
+        "resolved repo path": str(resolved_repo_path),
+        "repo path source": repo_path_source,
         "config path": str(resolved_config_path),
         "config source": config_source,
         "target repository": str(active_repo_path),

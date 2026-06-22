@@ -28,15 +28,33 @@ def test_parser_accepts_task_file(tmp_path: Path) -> None:
     assert args.task_file == task_file
 
 
-def test_parser_rejects_both_or_missing_task() -> None:
-    with pytest.raises(SystemExit):
-        build_parser().parse_args(["--repo-path", "."])
+def test_parser_rejects_both_task_and_mode_conflicts() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["--repo-path", ".", "--task", "a", "--task-file", "b"])
     with pytest.raises(SystemExit):
         build_parser().parse_args(
             ["--repo-path", ".", "--task", "task", "--plan-only", "--setup-only"]
         )
+
+
+def test_parser_accepts_run_file() -> None:
+    args = build_parser().parse_args(["--run-file", "run.yaml"])
+    assert args.run_file == Path("run.yaml")
+    assert args.repo_path is None
+
+
+def test_main_rejects_missing_task_without_run_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["agent.main", "--repo-path", "."])
+    with pytest.raises(SystemExit) as exit_code:
+        main_module.main()
+    assert exit_code.value.code == 2
+
+
+def test_main_rejects_missing_repo_path_without_run_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["agent.main", "--task", "task"])
+    with pytest.raises(SystemExit) as exit_code:
+        main_module.main()
+    assert exit_code.value.code == 2
 
 
 def test_main_rejects_protected_agent_branch(monkeypatch: pytest.MonkeyPatch) -> None:
