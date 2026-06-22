@@ -164,6 +164,38 @@ def _worktree_root(value: str | Path, project_root: Path) -> Path:
     return path if path.is_absolute() else (project_root / path).resolve()
 
 
+def _resolve_or_create_worktree(
+    *,
+    repo_path: Path,
+    worktree_root: Path,
+    agent_branch: str,
+    base_branch: str,
+    remote: str,
+) -> tuple[Path, bool]:
+    """Reuse a registered agent worktree or safely create a new one.
+
+    The boolean result is ``True`` when an existing worktree was reused. This
+    common path is used by setup-only, plan-only, and normal full runs.
+    """
+    existing_worktree = find_worktree_for_branch(repo_path, agent_branch)
+    if existing_worktree is not None:
+        if not existing_worktree.is_dir():
+            raise FileNotFoundError(
+                f"Registered worktree path is unavailable: {existing_worktree}"
+            )
+        return existing_worktree, True
+
+    base_is_available = branch_exists(repo_path, base_branch) or remote_branch_exists(
+        repo_path, remote, base_branch
+    )
+    if not base_is_available:
+        fetch_remote(repo_path, remote)
+    return (
+        create_worktree(repo_path, worktree_root, agent_branch, base_branch, remote),
+        False,
+    )
+
+
 def run_orchestrator(
     *,
     repo_path: Path,
@@ -279,31 +311,24 @@ def run_orchestrator(
             f"{selected_worktree_root}"
         )
         if dry_run:
-            print(f"Dry run: would create local worktree for {worktree_note}.")
-        else:
-            existing_worktree = (
-                find_worktree_for_branch(resolved_repo_path, selected_agent_branch)
-                if plan_only
-                else None
+            existing_worktree = find_worktree_for_branch(
+                resolved_repo_path, selected_agent_branch
             )
             if existing_worktree is not None:
-                worktree_path = existing_worktree
-                worktree_note = f"using existing worktree at {existing_worktree}"
+                worktree_note = f"would reuse existing worktree at {existing_worktree}"
+                print(f"Dry run: {worktree_note}.")
             else:
-                base_is_available = branch_exists(
-                    resolved_repo_path, selected_base_branch
-                ) or remote_branch_exists(
-                    resolved_repo_path, selected_remote, selected_base_branch
-                )
-                if not base_is_available:
-                    fetch_remote(resolved_repo_path, selected_remote)
-                worktree_path = create_worktree(
-                    resolved_repo_path,
-                    selected_worktree_root,
-                    selected_agent_branch,
-                    selected_base_branch,
-                    selected_remote,
-                )
+                print(f"Dry run: would create local worktree for {worktree_note}.")
+        else:
+            worktree_path, reused_worktree = _resolve_or_create_worktree(
+                repo_path=resolved_repo_path,
+                worktree_root=selected_worktree_root,
+                agent_branch=selected_agent_branch,
+                base_branch=selected_base_branch,
+                remote=selected_remote,
+            )
+            if reused_worktree:
+                worktree_note = f"using existing worktree at {worktree_path}"
             active_repo_path = worktree_path
             current_branch = get_current_branch(active_repo_path)
 

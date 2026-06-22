@@ -206,6 +206,122 @@ def test_setup_only_dry_run_still_skips_planner(
     assert not (run_dir / "planner_output.md").exists()
 
 
+def test_setup_only_reuses_existing_worktree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run_dir = tmp_path / "run"
+    worktree = tmp_path / "existing-worktree"
+    run_dir.mkdir()
+    worktree.mkdir()
+    monkeypatch.setattr(orchestrator, "ensure_git_repo", lambda path: True)
+    monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "agent/plan")
+    monkeypatch.setattr(orchestrator, "_create_run_dir", lambda path: run_dir)
+    monkeypatch.setattr(orchestrator, "find_worktree_for_branch", lambda *args: worktree)
+    monkeypatch.setattr(
+        orchestrator,
+        "create_worktree",
+        lambda *args, **kwargs: pytest.fail("Existing worktree must be reused"),
+    )
+
+    result = orchestrator.run_orchestrator(
+        repo_path=tmp_path,
+        task="setup only",
+        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        use_worktree=True,
+        base_branch="base",
+        agent_branch="agent/plan",
+        setup_only=True,
+    )
+
+    assert result.status == "setup-complete"
+    assert result.target_repo_path == worktree
+
+
+def test_full_run_reuses_existing_worktree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run_dir = tmp_path / "run"
+    worktree = tmp_path / "existing-worktree"
+    run_dir.mkdir()
+    worktree.mkdir()
+    phases: list[str] = []
+    monkeypatch.setattr(orchestrator, "ensure_git_repo", lambda path: True)
+    monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "agent/plan")
+    monkeypatch.setattr(orchestrator, "get_git_status", lambda path: "")
+    monkeypatch.setattr(orchestrator, "get_git_diff", lambda path: "")
+    monkeypatch.setattr(orchestrator, "_create_run_dir", lambda path: run_dir)
+    monkeypatch.setattr(orchestrator, "find_worktree_for_branch", lambda *args: worktree)
+    monkeypatch.setattr(
+        orchestrator,
+        "create_worktree",
+        lambda *args, **kwargs: pytest.fail("Existing worktree must be reused"),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_phase",
+        lambda *, phase, **kwargs: phases.append(phase) or f"{phase} output",
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_verification_commands",
+        lambda *args, **kwargs: {"pytest -q": "exit code: 0\nstdout:\n\nstderr:\n"},
+    )
+
+    result = orchestrator.run_orchestrator(
+        repo_path=tmp_path,
+        task="full run",
+        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        use_worktree=True,
+        base_branch="base",
+        agent_branch="agent/plan",
+    )
+
+    assert result.status == "completed"
+    assert result.target_repo_path == worktree
+    assert phases == ["planner", "implementer", "reviewer"]
+
+
+def test_full_run_creates_worktree_when_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run_dir = tmp_path / "run"
+    worktree = tmp_path / "new-worktree"
+    run_dir.mkdir()
+    worktree.mkdir()
+    phases: list[str] = []
+    monkeypatch.setattr(orchestrator, "ensure_git_repo", lambda path: True)
+    monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "agent/plan")
+    monkeypatch.setattr(orchestrator, "get_git_status", lambda path: "")
+    monkeypatch.setattr(orchestrator, "get_git_diff", lambda path: "")
+    monkeypatch.setattr(orchestrator, "_create_run_dir", lambda path: run_dir)
+    monkeypatch.setattr(orchestrator, "find_worktree_for_branch", lambda *args: None)
+    monkeypatch.setattr(orchestrator, "branch_exists", lambda *args: True)
+    monkeypatch.setattr(orchestrator, "create_worktree", lambda *args: worktree)
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_phase",
+        lambda *, phase, **kwargs: phases.append(phase) or f"{phase} output",
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_verification_commands",
+        lambda *args, **kwargs: {"pytest -q": "exit code: 0\nstdout:\n\nstderr:\n"},
+    )
+
+    result = orchestrator.run_orchestrator(
+        repo_path=tmp_path,
+        task="full run",
+        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        use_worktree=True,
+        base_branch="base",
+        agent_branch="agent/plan",
+    )
+
+    assert result.status == "completed"
+    assert result.worktree_path == worktree
+    assert phases == ["planner", "implementer", "reviewer"]
+
+
 def test_real_phase_rejects_protected_branch_before_claude(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

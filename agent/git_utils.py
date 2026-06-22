@@ -48,20 +48,28 @@ def ensure_git_repo(path: Path) -> bool:
     return result.returncode == 0 and result.stdout.strip().lower() == "true"
 
 
-def get_git_status(path: Path) -> str:
-    """Return concise Git working-tree status or a diagnostic."""
+def get_git_status(path: Path, timeout_seconds: int = 30) -> str:
+    """Return concise Git working-tree status or a timeout-safe diagnostic."""
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be greater than zero")
     try:
-        result = _run_git(path, "status", "--short")
-    except (OSError, subprocess.TimeoutExpired) as error:
+        result = _run_git(path, "status", "--short", timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        return f"Git status timed out after {timeout_seconds} seconds."
+    except OSError as error:
         return f"Unable to read Git status: {error}"
     return result.stdout if result.returncode == 0 else result.stderr.strip() or "Unable to read Git status."
 
 
-def get_git_diff(path: Path) -> str:
-    """Return an unstaged Git diff without executing external diff tools."""
+def get_git_diff(path: Path, timeout_seconds: int = 30) -> str:
+    """Return an unstaged Git diff with timeout-safe diagnostics."""
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be greater than zero")
     try:
-        result = _run_git(path, "diff", "--no-ext-diff")
-    except (OSError, subprocess.TimeoutExpired) as error:
+        result = _run_git(path, "diff", "--no-ext-diff", timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        return f"Git diff timed out after {timeout_seconds} seconds."
+    except OSError as error:
         return f"Unable to read Git diff: {error}"
     return result.stdout if result.returncode == 0 else result.stderr.strip() or "Unable to read Git diff."
 
