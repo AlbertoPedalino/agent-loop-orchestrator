@@ -8,6 +8,8 @@ import inspect
 from pathlib import Path
 from typing import Any
 
+from agent.log import get_logger
+
 
 class AgentSdkUnavailableError(RuntimeError):
     """Raised when the optional Claude Agent SDK extra is not installed."""
@@ -43,15 +45,18 @@ def _message_text(message: Any) -> str:
     return ""
 
 
-async def _collect_sdk_response(response: Any) -> str:
+async def _collect_sdk_response(response: Any, phase: str | None = None) -> str:
     if inspect.isawaitable(response):
         response = await response
     if hasattr(response, "__aiter__"):
+        logger = get_logger()
+        label = phase or "claude"
         parts: list[str] = []
         async for message in response:
             text = _message_text(message)
             if text:
                 parts.append(text)
+                logger.info("[%s] │ %s", label, " ".join(text.split())[:200])
         return "\n".join(parts)
     return _message_text(response)
 
@@ -59,17 +64,25 @@ async def _collect_sdk_response(response: Any) -> str:
 async def run_agent_sdk_prompt(
     prompt: str,
     repo_path: Path,
+    *,
     allowed_tools: list[str] | None = None,
+    disallowed_tools: list[str] | None = None,
     max_turns: int | None = None,
+    permission_mode: str | None = None,
+    timeout_seconds: int | None = None,
     phase: str | None = None,
 ) -> str:
     """Run a prompt through the optional SDK using a small compatibility adapter.
 
     The SDK is imported lazily so normal CLI installations do not require it.
-    The public SDK surface changes independently of this project; unsupported
+    The same allow/deny tool policy and permission mode used by the CLI backend
+    are forwarded here, so phase enforcement is identical across backends. The
+    public SDK surface changes independently of this project; unsupported
     versions fail at this adapter boundary instead of silently guessing APIs.
     """
     resolved_repo_path = _validate_repo_path(repo_path)
+    if timeout_seconds is not None and timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be greater than zero when provided")
     try:
         sdk = importlib.import_module("claude_agent_sdk")
     except ImportError as error:
@@ -88,13 +101,27 @@ async def run_agent_sdk_prompt(
     options_kwargs: dict[str, Any] = {"cwd": str(resolved_repo_path)}
     if allowed_tools:
         options_kwargs["allowed_tools"] = allowed_tools
+    if disallowed_tools:
+        options_kwargs["disallowed_tools"] = disallowed_tools
     if max_turns is not None:
         options_kwargs["max_turns"] = max_turns
+    if permission_mode is not None:
+        options_kwargs["permission_mode"] = permission_mode
 
     try:
         options = options_class(**options_kwargs)
         response = query(prompt=prompt, options=options)
-        output = await _collect_sdk_response(response)
+        if timeout_seconds is not None:
+            output = await asyncio.wait_for(
+                _collect_sdk_response(response, phase), timeout_seconds
+            )
+        else:
+            output = await _collect_sdk_response(response, phase)
+    except asyncio.TimeoutError as error:
+        phase_name = phase or "unknown"
+        raise AgentSdkRunnerError(
+            f"Agent SDK phase '{phase_name}' timed out after {timeout_seconds} seconds."
+        ) from error
     except Exception as error:  # SDK exceptions are version-specific.
         phase_name = phase or "unknown"
         raise AgentSdkRunnerError(f"Agent SDK phase '{phase_name}' failed: {error}") from error

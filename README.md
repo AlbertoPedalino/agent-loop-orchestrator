@@ -35,11 +35,33 @@ python -m pip install -e ".[dev,sdk]"
 
 The SDK is imported only when `--backend sdk` is selected. The adapter intentionally fails clearly if the installed SDK does not expose the supported `query`/`ClaudeAgentOptions` boundary.
 
+## Terminal output
+
+By default the CLI backend streams Claude's activity live: each phase logs its
+start, every tool call (e.g. `🔧 Read(file_path=...)`), assistant text, and a
+final `✔ done (turns=…, cost=$…)` line as it happens, instead of going silent
+until the phase ends. Logs are written to `stderr`; the final run-directory and
+report paths are printed to `stdout`, so the two never mix.
+
+- `--verbose` — add DEBUG detail (raw stream lines, per-message SDK events).
+- `--quiet` — warnings and errors only.
+- `--no-stream` — buffer each phase until it ends (no live tool log).
+
+These are display-only flags and may be combined with `--run-file`. The SDK
+backend logs each message as it arrives regardless of `--no-stream`.
+
 ## Guardrails and subagents
 
-Blocked command substrings are configured in YAML and are checked before verification execution. Defaults block commits, pushes, W&B sweeps, notebook execution, destructive Docker teardown, and recursive deletion.
+Blocked command substrings are configured in YAML. They are enforced in two places:
 
-`configs/subagents.default.yaml` defines the planner, implementer, fixer, and reviewer. Planner and reviewer are read-only by convention; this version records their allowed-tool configuration but does not yet enforce SDK-native tool permissions for CLI calls.
+1. **Verification commands** the orchestrator runs itself are checked before execution (deterministic, in `agent/policies.py`).
+2. **The agent's own tools** receive the same block list as backend deny rules (`Bash(<command>:*)`), passed via `--disallowedTools` (CLI) or `disallowed_tools` (SDK). The SDK receives the rules as a native list, so multi-word denials are exact; CLI matching is prefix-based and best-effort for chained or wrapped commands. Prefer the SDK backend when hard enforcement matters.
+
+Defaults block commits, pushes, W&B sweeps, notebook execution, destructive Docker teardown, and recursive deletion.
+
+`configs/subagents.default.yaml` defines the planner, implementer, fixer, and reviewer with their `allowed_tools` and optional `permission_mode`. These are now enforced on both backends: each phase is launched with `--allowedTools`/`allowed_tools`, so planner and reviewer (no write tools) physically cannot edit, and implementer/fixer run with `permission_mode: acceptEdits` so the headless backend can apply changes. A phase whose allowed tools include no write-capable tool (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Bash`) is treated as read-only.
+
+Each run records the resolved per-phase guardrails (backend, read-only flag, permission mode, allowed/disallowed tools) in `runs/<timestamp>/phase_events.jsonl`.
 
 ## Worktree isolation
 
@@ -69,7 +91,9 @@ What happens for a full in-place implementation loop:
 3. Otherwise fetch the remote only when the base branch is not already available, then create the agent branch from the base: `git checkout -b agent/<name> <base>`.
 4. Run planner → implementer → verification → fixer → reviewer on that branch.
 
-Safety: the agent branch must be set, must differ from the base branch, and cannot be a protected name (`main`, `master`, `develop`, `production`, `release/*`). The orchestrator never commits, pushes, merges, or deletes branches. The report records the original/resolved repo paths, branch mode, create-branch mode, original branch, base branch, agent branch, whether a branch was created or reused, the final branch, and whether the working tree is dirty at the end.
+Safety: the agent branch must be set, must differ from the base branch, and cannot be a protected name (`main`, `master`, `develop`, `production`, `release/*`). The orchestrator never commits, pushes, merges, or deletes branches.
+
+Protected-branch guard: write-capable phases (implementer, fixer) refuse to run on a protected branch and must never leave the repository on one. Read-only phases (planner, reviewer) are allowed on a protected branch because their tool policy prevents any modification—so a `plan_only` analysis works directly on `main` without creating a branch. The report records the original/resolved repo paths, branch mode, create-branch mode, original branch, base branch, agent branch, whether a branch was created or reused, the final branch, and whether the working tree is dirty at the end.
 
 ### Recommended: analysis task (no branch)
 
@@ -118,6 +142,34 @@ task: |
 ```
 
 This creates/checks out `agent/improve-action-chips` from `feature/unified-character-storage` in the same repository directory, runs the full loop on it, and reports the final branch and diff status.
+
+## Project memory
+
+So a run does not re-explore the repository from scratch every time, the loop keeps a curated `.agent-loop/memory.md` in the target repository with what it has learned (architecture, key files, gotchas). Two halves:
+
+1. **Inject** — before each phase, the orchestrator prepends the current memory to the prompt, so the agent verifies known areas instead of rediscovering them.
+2. **Update** — the final read-only phase (planner in `plan_only`, reviewer in a full loop) ends its reply with a fenced ` ```memory ``` ` block; the orchestrator extracts it and rewrites `memory.md`. No extra Claude call is made, and phases never edit the file directly, so read-only phases stay read-only and every change is a reviewable Git diff.
+
+Memory is stored in the main repository (not a throwaway worktree) so it persists across runs and branches. Configure it under `memory` (defaults shown):
+
+```yaml
+memory:
+  enabled: true                 # set false to disable injection and updates
+  file: .agent-loop/memory.md   # path relative to the target repository root
+```
+
+Memory is **knowledge the loop discovers** and rewrites. It is distinct from `config.yaml`, which is **human-authored policy** (verification commands, blocked commands, branch settings, source whitelists) that the loop enforces but never writes — keep guardrails there, not in memory. A repository-root `CLAUDE.md` is optional and complementary: it is auto-loaded by every interactive `claude` session in the repo (which the loop's prompt injection does not reach), so keep it lean and have it point to `.agent-loop/memory.md`.
+
+Recommended target-repository layout:
+
+```text
+GM-Board/
+└── .agent-loop/
+    ├── config.yaml   # human policy the orchestrator enforces
+    ├── memory.md     # accumulated knowledge the loop rewrites
+    └── tasks/
+        └── inspect-character-builder.yaml
+```
 
 ## Dry run
 
@@ -326,7 +378,6 @@ When using the repository virtual environment on Windows:
 
 ## Roadmap
 
-1. Enforce allowed tools through stable SDK lifecycle hooks when the SDK contract is finalized.
-2. Add optional plan-only execution as a first-class mode.
-3. Add configurable review gates before verification and branch handoff.
-4. Add optional cleanup policies that require explicit user confirmation.
+1. Enforce blocked commands via an SDK `PreToolUse` hook (exact substring match) so multi-word denials are robust on the SDK backend, not only prefix-based.
+2. Add configurable review gates before verification and branch handoff.
+3. Add optional cleanup policies that require explicit user confirmation.

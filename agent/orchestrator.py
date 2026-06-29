@@ -7,10 +7,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+import json
+import time
 
 import yaml
 
 from agent.claude_runner import run_claude_prompt
+from agent.log import get_logger
 from agent.git_utils import (
     branch_exists,
     checkout_in_place_agent_branch,
@@ -25,6 +28,15 @@ from agent.git_utils import (
     remote_branch_exists,
 )
 from agent.hooks import post_phase_hook, pre_phase_hook
+from agent.memory import (
+    MEMORY_UPDATE_INSTRUCTION,
+    MemoryConfig,
+    format_memory_section,
+    load_memory,
+    resolve_memory_config,
+    update_memory_from_output,
+)
+from agent.permissions import resolve_phase_permissions
 from agent.report import write_report
 from agent.sdk_runner import run_agent_sdk_prompt_sync
 from agent.subagents import SubagentConfig, load_subagents_config
@@ -41,6 +53,8 @@ PIPELINE_STEPS = (
     "reviewer",
     "report",
 )
+
+logger = get_logger()
 
 
 @dataclass(frozen=True)
@@ -179,6 +193,8 @@ def _read_prompt(
     repo_path: Path,
     context: str = "",
     project_context: str = "",
+    project_memory: str = "",
+    request_memory_update: bool = False,
 ) -> str:
     template = subagent.prompt_template.read_text(encoding="utf-8").strip()
     return (
@@ -188,10 +204,25 @@ def _read_prompt(
         f"Repository: {repo_path}\n\n"
         f"Task:\n{task.strip()}\n"
         + (f"\n{project_context.strip()}\n" if project_context.strip() else "")
+        + (f"\n{project_memory.strip()}\n" if project_memory.strip() else "")
         + "\nSafety constraints: do not commit, push, switch to a protected branch, "
         "run blocked commands, or change files outside the requested scope.\n"
         + (f"\n{context.strip()}\n" if context.strip() else "")
+        + (f"\n{MEMORY_UPDATE_INSTRUCTION}" if request_memory_update else "")
     )
+
+
+def _append_phase_event(run_dir: Path | None, event: dict[str, Any]) -> None:
+    """Append one phase guardrail event to the run's phase-events log.
+
+    This is what gives the pre/post-phase hooks an observable effect: their
+    deterministic metadata, the resolved backend, and the enforced tool policy
+    are recorded per run for auditing instead of being discarded.
+    """
+    if run_dir is None:
+        return
+    with (run_dir / "phase_events.jsonl").open("a", encoding="utf-8") as log:
+        log.write(json.dumps(event, sort_keys=True) + "\n")
 
 
 def _run_phase(
@@ -203,40 +234,84 @@ def _run_phase(
     backend: str,
     subagent: SubagentConfig,
     max_budget_usd: float | None,
+    blocked_commands: list[str] | None = None,
+    timeout_seconds: int = 600,
+    stream: bool = True,
+    run_dir: Path | None = None,
 ) -> str:
-    """Dispatch a configured phase through the selected backend."""
+    """Dispatch a configured phase through the selected backend.
+
+    Read-only phases (no write-capable tools) may run on a protected branch
+    because their tool policy prevents any modification. Write-capable phases are
+    refused on a protected branch and must never leave the repository on one.
+    """
+    permissions = resolve_phase_permissions(
+        subagent.allowed_tools, subagent.permission_mode, blocked_commands or []
+    )
     current_branch = get_current_branch(repo_path)
-    if is_protected_branch(current_branch):
+    if not subagent.is_read_only and is_protected_branch(current_branch):
         raise RuntimeError(
-            f"Refusing to run phase '{phase}' on protected branch '{current_branch}'. "
-            "Use an isolated agent worktree."
+            f"Refusing to run write-capable phase '{phase}' on protected branch "
+            f"'{current_branch}'. Use an isolated agent worktree or in-place agent branch."
         )
-    pre_phase_hook(phase, repo_path, task)
+    pre_metadata = pre_phase_hook(phase, repo_path, task)
     selected_backend = subagent.backend or backend
+    logger.info(
+        "▶ %s starting (backend=%s, %s, tools=%s)",
+        phase,
+        selected_backend,
+        "read-only" if subagent.is_read_only else f"write/{permissions.permission_mode or 'default'}",
+        ",".join(permissions.allowed_tools) or "none",
+    )
+    started_at = time.monotonic()
     if selected_backend == "cli":
         output = run_claude_prompt(
             prompt,
             repo_path,
-            max_turns=subagent.max_turns,
+            allowed_tools=permissions.allowed_tools,
+            disallowed_tools=permissions.disallowed_tools,
+            permission_mode=permissions.permission_mode,
             max_budget_usd=max_budget_usd,
+            timeout_seconds=timeout_seconds,
+            stream=stream,
             phase=phase,
         )
     elif selected_backend == "sdk":
         output = run_agent_sdk_prompt_sync(
             prompt,
             repo_path,
-            allowed_tools=subagent.allowed_tools,
+            allowed_tools=permissions.allowed_tools,
+            disallowed_tools=permissions.disallowed_tools,
             max_turns=subagent.max_turns,
+            permission_mode=permissions.permission_mode,
+            timeout_seconds=timeout_seconds,
             phase=phase,
         )
     else:
         raise ValueError(f"Unsupported backend: {selected_backend}")
-    branch_after_phase = get_current_branch(repo_path)
-    if is_protected_branch(branch_after_phase):
-        raise RuntimeError(
-            f"Phase '{phase}' left the repository on protected branch '{branch_after_phase}'."
-        )
-    post_phase_hook(phase, output)
+    logger.info(
+        "✔ %s finished in %.1fs (%d chars)", phase, time.monotonic() - started_at, len(output)
+    )
+    if not subagent.is_read_only:
+        branch_after_phase = get_current_branch(repo_path)
+        if is_protected_branch(branch_after_phase):
+            raise RuntimeError(
+                f"Phase '{phase}' left the repository on protected branch "
+                f"'{branch_after_phase}'."
+            )
+    post_metadata = post_phase_hook(phase, output)
+    _append_phase_event(
+        run_dir,
+        {
+            **pre_metadata,
+            **post_metadata,
+            "backend": selected_backend,
+            "read_only": subagent.is_read_only,
+            "permission_mode": permissions.permission_mode or "default",
+            "allowed_tools": permissions.allowed_tools,
+            "disallowed_tools": permissions.disallowed_tools,
+        },
+    )
     return output
 
 
@@ -314,6 +389,15 @@ def _wants_in_place_branch(create_branch: str, plan_only: bool, setup_only: bool
     return not setup_only
 
 
+def _record_memory_update(memory_config: MemoryConfig, output: str) -> str:
+    """Persist a memory block from *output* and return a report-friendly status."""
+    if not memory_config.enabled:
+        return "disabled"
+    if update_memory_from_output(memory_config, output):
+        return f"updated ({memory_config.path})"
+    return "unchanged (no memory block emitted)"
+
+
 def _finalize_git_details(details: dict[str, str | int], repo_path: Path) -> None:
     """Record the final branch and end-of-run dirty state on every report path."""
     try:
@@ -346,6 +430,7 @@ def run_orchestrator(
     run_file_path: Path | None = None,
     launched_from: str = "cli-args",
     repo_path_source: str = "cli --repo-path",
+    stream: bool = True,
 ) -> OrchestrationResult:
     """Run the safe orchestration loop, or simulate it in ``dry_run`` mode.
 
@@ -368,6 +453,9 @@ def run_orchestrator(
     config = deepcopy(load_config(resolved_config_path))
     project_context = _resolve_project_context(config)
     formatted_project_context = _format_project_context(project_context)
+    # Memory persists in the main repository so it survives across runs/worktrees.
+    memory_config = resolve_memory_config(config, resolved_repo_path)
+    formatted_project_memory = format_memory_section(load_memory(memory_config))
     project_config = _mapping(config, "project")
     backend_config = _mapping(config, "backend")
     git_config = _mapping(config, "git")
@@ -441,6 +529,9 @@ def run_orchestrator(
     max_changed_files = limits.get("max_changed_files", 8)
     if not isinstance(max_changed_files, int) or max_changed_files <= 0:
         raise ValueError("limits.max_changed_files must be a positive integer")
+    phase_timeout_seconds = limits.get("phase_timeout_seconds", 600)
+    if not isinstance(phase_timeout_seconds, int) or phase_timeout_seconds <= 0:
+        raise ValueError("limits.phase_timeout_seconds must be a positive integer")
 
     subagents_path = subagents_config_path or project_root / "configs" / "subagents.default.yaml"
     subagents = load_subagents_config(subagents_path)
@@ -497,9 +588,9 @@ def run_orchestrator(
             )
             if existing_worktree is not None:
                 worktree_note = f"would reuse existing worktree at {existing_worktree}"
-                print(f"Dry run: {worktree_note}.")
+                logger.info("Dry run: %s.", worktree_note)
             else:
-                print(f"Dry run: would create local worktree for {worktree_note}.")
+                logger.info("Dry run: would create local worktree for %s.", worktree_note)
         else:
             worktree_path, reused_worktree = _resolve_or_create_worktree(
                 repo_path=resolved_repo_path,
@@ -515,7 +606,7 @@ def run_orchestrator(
     elif wants_in_place_branch:
         in_place_note = f"branch {selected_agent_branch} from {selected_base_branch} (in place)"
         if dry_run:
-            print(f"Dry run: would create/checkout in-place {in_place_note}.")
+            logger.info("Dry run: would create/checkout in-place %s.", in_place_note)
         else:
             branch_result = checkout_in_place_agent_branch(
                 resolved_repo_path,
@@ -532,13 +623,13 @@ def run_orchestrator(
                 f"{branch_result.final_branch} in {resolved_repo_path}"
             )
 
-    print("Prepared orchestration pipeline:")
-    for index, step in enumerate(PIPELINE_STEPS, start=1):
-        print(f"  {index}. {step}")
-    print(f"Target repository: {active_repo_path}")
-    print(f"Backend: {selected_backend}")
+    logger.info("Prepared pipeline: %s", " -> ".join(PIPELINE_STEPS))
+    logger.info("Target repository: %s", active_repo_path)
+    logger.info("Backend: %s (stream=%s)", selected_backend, stream)
     if dry_run:
-        print("Dry run: Claude, verification, worktree creation, and target-repository changes are disabled.")
+        logger.info(
+            "Dry run: Claude, verification, worktree creation, and target changes are disabled."
+        )
 
     details: dict[str, str | int] = {
         "backend": selected_backend,
@@ -584,6 +675,8 @@ def run_orchestrator(
                     task,
                     active_repo_path,
                     project_context=formatted_project_context,
+                    project_memory=formatted_project_memory,
+                    request_memory_update=memory_config.enabled,
                 )
                 _write_markdown(run_dir / "planner_prompt.md", planner_prompt)
                 dry_run_status = get_git_status(active_repo_path)
@@ -611,6 +704,8 @@ def run_orchestrator(
                 task,
                 active_repo_path,
                 project_context=formatted_project_context,
+                project_memory=formatted_project_memory,
+                request_memory_update=memory_config.enabled and plan_only,
             )
             _write_markdown(run_dir / "planner_prompt.md", planner_prompt)
             planner_output = _run_phase(
@@ -621,6 +716,10 @@ def run_orchestrator(
                 backend=selected_backend,
                 subagent=subagents["planner"],
                 max_budget_usd=float(max_budget) if max_budget is not None else None,
+                blocked_commands=blocked_commands,
+                timeout_seconds=phase_timeout_seconds,
+                stream=stream,
+                run_dir=run_dir,
             )
             _write_markdown(run_dir / "planner_output.md", planner_output)
 
@@ -635,6 +734,7 @@ def run_orchestrator(
                 details["mode"] = "plan-only"
                 details["risks"] = "Planner output is advisory; review it before any implementation."
                 details["next steps"] = "Review planner_output.md before allowing implementation."
+                details["memory"] = _record_memory_update(memory_config, planner_output)
                 status = "plan-only-complete"
                 _finalize_git_details(details, active_repo_path)
                 report_path = write_report(run_dir, task, status, details)
@@ -650,12 +750,17 @@ def run_orchestrator(
                     active_repo_path,
                     f"## Planner Output\n\n{planner_output}",
                     formatted_project_context,
+                    formatted_project_memory,
                 ),
                 task=task,
                 repo_path=active_repo_path,
                 backend=selected_backend,
                 subagent=subagents["implementer"],
                 max_budget_usd=float(max_budget) if max_budget is not None else None,
+                blocked_commands=blocked_commands,
+                timeout_seconds=phase_timeout_seconds,
+                stream=stream,
+                run_dir=run_dir,
             )
             _write_markdown(run_dir / "implementer_output.md", implementer_output)
             diff = get_git_diff(active_repo_path)
@@ -689,12 +794,17 @@ def run_orchestrator(
                         f"{planner_output}\n\n## Current Diff\n\n{get_git_diff(active_repo_path)}\n\n"
                         f"## Verification Attempt {fix_attempts}\n\n{verification_context}",
                         formatted_project_context,
+                        formatted_project_memory,
                     ),
                     task=task,
                     repo_path=active_repo_path,
                     backend=selected_backend,
                     subagent=subagents["fixer"],
                     max_budget_usd=float(max_budget) if max_budget is not None else None,
+                    blocked_commands=blocked_commands,
+                    timeout_seconds=phase_timeout_seconds,
+                    stream=stream,
+                    run_dir=run_dir,
                 )
                 _write_markdown(run_dir / f"fixer_output_attempt_{fix_attempts}.md", fixer_output)
                 verification_results = run_verification_commands(
@@ -716,12 +826,18 @@ def run_orchestrator(
                     f"## Final Diff\n\n{final_diff}\n\n"
                     f"## Verification Status\n\n{'passed' if passed else 'failed after fix limit'}",
                     formatted_project_context,
+                    formatted_project_memory,
+                    request_memory_update=memory_config.enabled,
                 ),
                 task=task,
                 repo_path=active_repo_path,
                 backend=selected_backend,
                 subagent=subagents["reviewer"],
                 max_budget_usd=float(max_budget) if max_budget is not None else None,
+                blocked_commands=blocked_commands,
+                timeout_seconds=phase_timeout_seconds,
+                stream=stream,
+                run_dir=run_dir,
             )
             _write_markdown(run_dir / "reviewer_output.md", reviewer_output)
 
@@ -735,6 +851,7 @@ def run_orchestrator(
                 if not passed
                 else "Review the reviewer output before committing any changes."
             )
+            details["memory"] = _record_memory_update(memory_config, reviewer_output)
             status = "completed" if passed else "verification-failed"
 
         _finalize_git_details(details, active_repo_path)

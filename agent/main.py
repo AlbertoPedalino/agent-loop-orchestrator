@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent.git_utils import is_protected_branch
+from agent.log import configure_logging
 from agent.orchestrator import resolve_config_selection, run_orchestrator
 from agent.run_file import load_run_file, resolve_task_text
 
@@ -93,6 +94,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--plan-only",
         action="store_true",
         help="Run or simulate only the planner phase, then stop before implementation.",
+    )
+    parser.add_argument(
+        "--no-stream",
+        dest="stream",
+        action="store_false",
+        default=True,
+        help="Disable live streaming of Claude output (buffer each phase until it ends).",
+    )
+    log_group = parser.add_mutually_exclusive_group()
+    log_group.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show DEBUG logs (raw stream lines, per-message SDK events).",
+    )
+    log_group.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Show warnings and errors only.",
     )
     return parser
 
@@ -242,6 +261,7 @@ def main() -> int:
     """Parse CLI arguments and execute the selected orchestration mode."""
     parser = build_parser()
     args = parser.parse_args()
+    configure_logging(verbose=args.verbose, quiet=args.quiet)
     if args.max_fix_attempts is not None and args.max_fix_attempts < 0:
         parser.error("--max-fix-attempts must be zero or greater")
     if args.agent_branch and is_protected_branch(args.agent_branch):
@@ -272,6 +292,7 @@ def main() -> int:
             run_file_path=invocation.run_file_path,
             launched_from=invocation.launched_from,
             repo_path_source=invocation.repo_path_source,
+            stream=args.stream,
         )
     except (FileNotFoundError, NotADirectoryError, RuntimeError, ValueError) as error:
         parser.error(str(error))

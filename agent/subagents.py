@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from agent.permissions import VALID_PERMISSION_MODES, is_read_only_tool_set
+
 
 @dataclass(frozen=True)
 class SubagentConfig:
@@ -17,6 +19,12 @@ class SubagentConfig:
     max_turns: int
     prompt_template: Path
     backend: str | None = None
+    permission_mode: str | None = None
+
+    @property
+    def is_read_only(self) -> bool:
+        """Return whether this phase grants no write-capable tools."""
+        return is_read_only_tool_set(self.allowed_tools)
 
 
 def _required_string(entry: dict[str, Any], field: str, agent_name: str) -> str:
@@ -57,6 +65,12 @@ def load_subagents_config(path: Path) -> dict[str, SubagentConfig]:
         backend = entry.get("backend")
         if backend is not None and backend not in {"cli", "sdk"}:
             raise ValueError(f"Subagent '{name}' backend must be 'cli' or 'sdk'")
+        permission_mode = entry.get("permission_mode")
+        if permission_mode is not None and permission_mode not in VALID_PERMISSION_MODES:
+            raise ValueError(
+                f"Subagent '{name}' permission_mode must be one of: "
+                f"{', '.join(sorted(VALID_PERMISSION_MODES))}"
+            )
         configs[name] = SubagentConfig(
             name=name,
             description=description,
@@ -64,5 +78,6 @@ def load_subagents_config(path: Path) -> dict[str, SubagentConfig]:
             max_turns=max_turns,
             prompt_template=prompt_path,
             backend=backend,
+            permission_mode=permission_mode,
         )
     return configs

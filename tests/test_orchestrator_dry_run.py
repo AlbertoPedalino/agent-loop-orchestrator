@@ -116,6 +116,67 @@ def test_plan_only_runs_planner_and_skips_later_phases(
     assert (run_dir / "report.md").is_file()
 
 
+def test_plan_only_writes_memory_from_emitted_block(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    monkeypatch.setattr(orchestrator, "ensure_git_repo", lambda path: True)
+    monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "agent/plan")
+    monkeypatch.setattr(orchestrator, "get_git_status", lambda path: "")
+    monkeypatch.setattr(orchestrator, "get_git_diff", lambda path: "")
+    monkeypatch.setattr(orchestrator, "_create_run_dir", lambda path: run_dir)
+    monkeypatch.setattr(
+        orchestrator,
+        "run_claude_prompt",
+        lambda *args, **kwargs: "Report body\n```memory\n# Project Memory\nEntry point: app.py\n```",
+    )
+
+    result = orchestrator.run_orchestrator(
+        repo_path=tmp_path,
+        task="inspect",
+        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        plan_only=True,
+    )
+
+    assert result.status == "plan-only-complete"
+    memory_file = tmp_path / ".agent-loop" / "memory.md"
+    assert memory_file.read_text(encoding="utf-8") == "# Project Memory\nEntry point: app.py\n"
+
+
+def test_memory_injected_into_planner_prompt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (tmp_path / ".agent-loop").mkdir()
+    (tmp_path / ".agent-loop" / "memory.md").write_text(
+        "# Project Memory\nKnown: builder lives in src/", encoding="utf-8"
+    )
+    prompts: list[str] = []
+    monkeypatch.setattr(orchestrator, "ensure_git_repo", lambda path: True)
+    monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "agent/plan")
+    monkeypatch.setattr(orchestrator, "get_git_status", lambda path: "")
+    monkeypatch.setattr(orchestrator, "get_git_diff", lambda path: "")
+    monkeypatch.setattr(orchestrator, "_create_run_dir", lambda path: run_dir)
+    monkeypatch.setattr(
+        orchestrator,
+        "run_claude_prompt",
+        lambda prompt, repo_path, **kwargs: prompts.append(prompt) or "ok",
+    )
+
+    orchestrator.run_orchestrator(
+        repo_path=tmp_path,
+        task="inspect",
+        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        plan_only=True,
+    )
+
+    assert "Accumulated Project Memory" in prompts[0]
+    assert "builder lives in src/" in prompts[0]
+    assert "Memory Update (required)" in prompts[0]
+
+
 def test_plan_only_reuses_existing_worktree(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -322,10 +383,12 @@ def test_full_run_creates_worktree_when_missing(
     assert phases == ["planner", "implementer", "reviewer"]
 
 
-def test_real_phase_rejects_protected_branch_before_claude(
+def test_write_phase_rejects_protected_branch_before_claude(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    subagent = SubagentConfig("planner", "plan", ["Read"], 1, PROJECT_ROOT / "prompts" / "planner.md")
+    subagent = SubagentConfig(
+        "implementer", "impl", ["Edit", "Bash"], 1, PROJECT_ROOT / "prompts" / "implementer.md"
+    )
     monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "main")
     monkeypatch.setattr(
         orchestrator,
@@ -335,11 +398,41 @@ def test_real_phase_rejects_protected_branch_before_claude(
 
     with pytest.raises(RuntimeError, match="protected branch"):
         orchestrator._run_phase(
-            phase="planner",
-            prompt="plan",
+            phase="implementer",
+            prompt="impl",
             task="task",
             repo_path=tmp_path,
             backend="cli",
             subagent=subagent,
             max_budget_usd=None,
         )
+
+
+def test_read_only_phase_allowed_on_protected_branch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    subagent = SubagentConfig(
+        "planner", "plan", ["Read", "Grep", "Glob"], 1, PROJECT_ROOT / "prompts" / "planner.md"
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "main")
+    monkeypatch.setattr(
+        orchestrator,
+        "run_claude_prompt",
+        lambda prompt, repo_path, **kwargs: captured.update(kwargs) or "safe plan",
+    )
+
+    output = orchestrator._run_phase(
+        phase="planner",
+        prompt="plan",
+        task="task",
+        repo_path=tmp_path,
+        backend="cli",
+        subagent=subagent,
+        max_budget_usd=None,
+        blocked_commands=["git push"],
+    )
+
+    assert output == "safe plan"
+    assert captured["allowed_tools"] == ["Read", "Grep", "Glob"]
+    assert captured["permission_mode"] is None

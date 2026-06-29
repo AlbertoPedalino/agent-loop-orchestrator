@@ -5,9 +5,19 @@ from __future__ import annotations
 from pathlib import Path
 import shlex
 import subprocess
+import sys
 
 from agent.hooks import post_command_hook, pre_command_hook
 from agent.policies import validate_commands_allowed
+
+
+def _split_command(command: str) -> list[str]:
+    """Split a command string into argv using platform-appropriate rules.
+
+    POSIX splitting eats backslashes, which corrupts Windows paths such as
+    ``C:\\tools\\python``; ``posix=False`` preserves them on Windows.
+    """
+    return shlex.split(command, posix=sys.platform != "win32")
 
 
 def run_verification_commands(
@@ -34,7 +44,7 @@ def run_verification_commands(
     for command in commands:
         pre_command_hook(command, blocked_commands or [])
         try:
-            arguments = shlex.split(command, posix=True)
+            arguments = _split_command(command)
             if not arguments:
                 results[command] = "exit code: skipped\nstdout:\n\nstderr:\nEmpty command."
                 continue
@@ -43,6 +53,8 @@ def run_verification_commands(
                 cwd=resolved_repo_path,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 check=False,
                 timeout=timeout,
             )
@@ -58,5 +70,10 @@ def run_verification_commands(
 
 
 def verification_passed(results: dict[str, str]) -> bool:
-    """Return whether every collected verification result exited successfully."""
+    """Return whether every collected verification result exited successfully.
+
+    An empty mapping (no verification commands configured) passes vacuously:
+    "nothing to verify" is treated as success. Configure at least one command
+    when a run should fail unless a real check passes.
+    """
     return all(result.startswith("exit code: 0\n") for result in results.values())

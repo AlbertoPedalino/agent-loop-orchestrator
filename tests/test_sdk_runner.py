@@ -36,7 +36,19 @@ def test_sdk_adapter_collects_mocked_async_response(monkeypatch: pytest.MonkeyPa
     fake_sdk = SimpleNamespace(query=query, ClaudeAgentOptions=Options)
     monkeypatch.setattr("agent.sdk_runner.importlib.import_module", lambda name: fake_sdk)
 
-    assert run_agent_sdk_prompt_sync("plan", tmp_path, ["Read"], 2, "planner") == "first\nsecond"
+    output = run_agent_sdk_prompt_sync(
+        "plan",
+        tmp_path,
+        allowed_tools=["Read"],
+        disallowed_tools=["Bash(git push:*)"],
+        max_turns=2,
+        permission_mode="acceptEdits",
+        phase="planner",
+    )
+
+    assert output == "first\nsecond"
     assert captured["cwd"] == str(tmp_path.resolve())
     assert captured["allowed_tools"] == ["Read"]
+    assert captured["disallowed_tools"] == ["Bash(git push:*)"]
     assert captured["max_turns"] == 2
+    assert captured["permission_mode"] == "acceptEdits"

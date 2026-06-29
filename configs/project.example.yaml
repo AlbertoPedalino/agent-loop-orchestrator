@@ -6,10 +6,9 @@ project:
 limits:
   max_fix_attempts: 2
   max_changed_files: 5
-  max_turns_plan: 4
-  max_turns_implement: 10
-  max_turns_fix: 6
-  max_budget_usd: 1.5
+  phase_timeout_seconds: 600
+  # max_budget_usd: set only when billing through the Anthropic API; leave unset
+  # on a Claude subscription (Pro/Plus/Max).
 
 verification:
   commands:
