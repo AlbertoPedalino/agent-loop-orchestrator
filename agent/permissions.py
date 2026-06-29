@@ -1,18 +1,18 @@
-"""Backend-agnostic tool permissions for a single agent phase.
+"""Provider-agnostic tool permissions for a single agent phase.
 
 The orchestrator resolves one :class:`PhasePermissions` per phase and hands it to
-whichever backend runs the phase. Both the Claude Code CLI and the Agent SDK then
-enforce the same allow/deny tool policy, so read-only phases cannot edit and the
-configured blocked commands are denied at the tool boundary—not merely by prompt
-convention.
+whichever local CLI provider runs the phase. Claude receives allow/deny tool
+policy, so read-only phases cannot edit and the configured blocked commands are
+denied at the CLI tool boundary, not merely by prompt convention. Codex uses the
+same phase mutability to select a read-only or workspace-write sandbox and
+receives deny rules as prompt policy.
 
-Enforcement strength differs by backend:
+Enforcement strength differs by provider:
 
-* The SDK receives ``disallowed_tools`` as a native Python list, so multi-word
-  deny rules (for example ``Bash(git push:*)``) are passed through verbatim.
-* The CLI receives the same rules encoded as flags. CLI matching is prefix based,
-  so denials are best-effort for commands that are chained or wrapped. Prefer the
-  SDK backend when hard enforcement of blocked commands matters.
+* The Claude CLI receives the same rules encoded as flags. CLI matching is prefix based,
+  so denials are best-effort for commands that are chained or wrapped.
+* Codex CLI does not expose equivalent allow/deny flags here; its deterministic
+  boundary is the sandbox mode selected from the phase's write capability.
 
 The deterministic verifier guard in :mod:`agent.policies` remains the source of
 truth for the orchestrator's own verification commands regardless of backend.

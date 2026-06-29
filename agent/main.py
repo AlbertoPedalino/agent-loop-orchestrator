@@ -6,6 +6,7 @@ import argparse
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent.agent_options import VALID_AGENT_PROVIDERS, VALID_BACKENDS
 from agent.git_utils import is_protected_branch
 from agent.log import configure_logging
 from agent.orchestrator import resolve_config_selection, run_orchestrator
@@ -17,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser."""
-    parser = argparse.ArgumentParser(description="Run a controlled Claude Code orchestration loop.")
+    parser = argparse.ArgumentParser(description="Run a controlled agent orchestration loop.")
     parser.add_argument(
         "--repo-path",
         type=Path,
@@ -28,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "YAML run file providing every run parameter. Cannot be combined with "
-            "other run flags such as --task, --task-file, --backend, or --plan-only."
+            "other run flags such as --task, --task-file, --agent, --backend, or --plan-only."
         ),
     )
     task_group = parser.add_mutually_exclusive_group()
@@ -42,7 +43,33 @@ def build_parser() -> argparse.ArgumentParser:
             ".agent-loop/config.yaml or .agent-loop.yaml in the target repository."
         ),
     )
-    parser.add_argument("--backend", choices=("cli", "sdk"), help="Override configured backend.")
+    agent_group = parser.add_mutually_exclusive_group()
+    agent_group.add_argument(
+        "--agent",
+        choices=sorted(VALID_AGENT_PROVIDERS),
+        help="Override configured agent provider.",
+    )
+    agent_group.add_argument(
+        "-claude",
+        "--claude",
+        dest="agent",
+        action="store_const",
+        const="claude",
+        help="Use Claude Code for every phase.",
+    )
+    agent_group.add_argument(
+        "-codex",
+        "--codex",
+        dest="agent",
+        action="store_const",
+        const="codex",
+        help="Use Codex CLI for every phase.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=sorted(VALID_BACKENDS),
+        help="Override configured execution backend. Only local CLI execution is supported.",
+    )
     parser.add_argument("--max-fix-attempts", type=int, help="Override limits.max_fix_attempts.")
     parser.add_argument("--dry-run", action="store_true", help="Write run metadata without target changes.")
     parser.add_argument(
@@ -88,7 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode_group.add_argument(
         "--setup-only",
         action="store_true",
-        help="Prepare/report worktree setup without invoking planner or other Claude phases.",
+        help="Prepare/report worktree setup without invoking planner or other agent phases.",
     )
     mode_group.add_argument(
         "--plan-only",
@@ -100,13 +127,13 @@ def build_parser() -> argparse.ArgumentParser:
         dest="stream",
         action="store_false",
         default=True,
-        help="Disable live streaming of Claude output (buffer each phase until it ends).",
+        help="Disable live streaming of agent output (buffer each phase until it ends).",
     )
     log_group = parser.add_mutually_exclusive_group()
     log_group.add_argument(
         "--verbose",
         action="store_true",
-        help="Show DEBUG logs (raw stream lines, per-message SDK events).",
+        help="Show DEBUG logs (raw stream lines and per-message events).",
     )
     log_group.add_argument(
         "--quiet",
@@ -124,6 +151,7 @@ class _RunInvocation:
     repo_path_source: str
     task: str
     config_path: Path | None
+    agent: str | None
     backend: str | None
     use_worktree: bool | None
     branch_mode: str | None
@@ -162,6 +190,7 @@ def _conflicting_run_file_flags(args: argparse.Namespace) -> list[str]:
         ("--task", args.task),
         ("--task-file", args.task_file),
         ("--config", args.config),
+        ("--agent/-claude/-codex", args.agent),
         ("--backend", args.backend),
         ("--use-worktree", args.use_worktree),
         ("--branch-mode", args.branch_mode),
@@ -213,6 +242,7 @@ def _resolve_run_invocation(args: argparse.Namespace, parser: argparse.ArgumentP
             repo_path_source=repo_path_source,
             task=resolve_task_text(run),
             config_path=run.config,
+            agent=run.agent,
             backend=run.backend,
             use_worktree=run.use_worktree,
             branch_mode=run.branch_mode,
@@ -239,6 +269,7 @@ def _resolve_run_invocation(args: argparse.Namespace, parser: argparse.ArgumentP
         repo_path_source="cli --repo-path",
         task=_task_from_args(args),
         config_path=args.config,
+        agent=args.agent,
         backend=args.backend,
         use_worktree=args.use_worktree,
         branch_mode=args.branch_mode,
@@ -277,6 +308,7 @@ def main() -> int:
             config_source=config_selection.source,
             max_fix_attempts=invocation.max_fix_attempts,
             dry_run=invocation.dry_run,
+            agent=invocation.agent,
             backend=invocation.backend,
             use_worktree=invocation.use_worktree,
             branch_mode=invocation.branch_mode,

@@ -12,7 +12,9 @@ import time
 
 import yaml
 
+from agent.agent_options import VALID_AGENT_PROVIDERS, VALID_BACKENDS
 from agent.claude_runner import run_claude_prompt
+from agent.codex_runner import run_codex_prompt
 from agent.log import get_logger
 from agent.git_utils import (
     branch_exists,
@@ -38,7 +40,6 @@ from agent.memory import (
 )
 from agent.permissions import resolve_phase_permissions
 from agent.report import write_report
-from agent.sdk_runner import run_agent_sdk_prompt_sync
 from agent.subagents import SubagentConfig, load_subagents_config
 from agent.verifier import run_verification_commands, verification_passed
 
@@ -125,6 +126,22 @@ def _mapping(config: dict[str, Any], key: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"Configuration '{key}' must be a YAML mapping")
     return value
+
+
+def _resolve_agent_provider(config: dict[str, Any], override: str | None) -> str:
+    if override is not None:
+        return override
+    value = config.get("agent")
+    if value is None:
+        return "claude"
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        provider = value.get("provider", "claude")
+        if not isinstance(provider, str):
+            raise ValueError("Configuration 'agent.provider' must be a string")
+        return provider
+    raise ValueError("Configuration 'agent' must be a string or YAML mapping")
 
 
 def _create_run_dir(runs_root: Path) -> Path:
@@ -216,7 +233,7 @@ def _append_phase_event(run_dir: Path | None, event: dict[str, Any]) -> None:
     """Append one phase guardrail event to the run's phase-events log.
 
     This is what gives the pre/post-phase hooks an observable effect: their
-    deterministic metadata, the resolved backend, and the enforced tool policy
+    deterministic metadata, the resolved agent/backend, and the enforced tool policy
     are recorded per run for auditing instead of being discarded.
     """
     if run_dir is None:
@@ -231,6 +248,7 @@ def _run_phase(
     prompt: str,
     task: str,
     repo_path: Path,
+    agent: str,
     backend: str,
     subagent: SubagentConfig,
     max_budget_usd: float | None,
@@ -239,7 +257,7 @@ def _run_phase(
     stream: bool = True,
     run_dir: Path | None = None,
 ) -> str:
-    """Dispatch a configured phase through the selected backend.
+    """Dispatch a configured phase through the selected agent/backend.
 
     Read-only phases (no write-capable tools) may run on a protected branch
     because their tool policy prevents any modification. Write-capable phases are
@@ -255,16 +273,18 @@ def _run_phase(
             f"'{current_branch}'. Use an isolated agent worktree or in-place agent branch."
         )
     pre_metadata = pre_phase_hook(phase, repo_path, task)
+    selected_agent = subagent.agent or agent
     selected_backend = subagent.backend or backend
     logger.info(
-        "▶ %s starting (backend=%s, %s, tools=%s)",
+        "▶ %s starting (agent=%s, backend=%s, %s, tools=%s)",
         phase,
+        selected_agent,
         selected_backend,
         "read-only" if subagent.is_read_only else f"write/{permissions.permission_mode or 'default'}",
         ",".join(permissions.allowed_tools) or "none",
     )
     started_at = time.monotonic()
-    if selected_backend == "cli":
+    if selected_agent == "claude" and selected_backend == "cli":
         output = run_claude_prompt(
             prompt,
             repo_path,
@@ -276,19 +296,22 @@ def _run_phase(
             stream=stream,
             phase=phase,
         )
-    elif selected_backend == "sdk":
-        output = run_agent_sdk_prompt_sync(
+    elif selected_agent == "codex" and selected_backend == "cli":
+        output = run_codex_prompt(
             prompt,
             repo_path,
             allowed_tools=permissions.allowed_tools,
             disallowed_tools=permissions.disallowed_tools,
-            max_turns=subagent.max_turns,
             permission_mode=permissions.permission_mode,
+            max_budget_usd=max_budget_usd,
             timeout_seconds=timeout_seconds,
+            stream=stream,
             phase=phase,
         )
+    elif selected_agent == "codex":
+        raise ValueError("Codex agent supports only backend 'cli'")
     else:
-        raise ValueError(f"Unsupported backend: {selected_backend}")
+        raise ValueError(f"Unsupported agent/backend: {selected_agent}/{selected_backend}")
     logger.info(
         "✔ %s finished in %.1fs (%d chars)", phase, time.monotonic() - started_at, len(output)
     )
@@ -305,6 +328,7 @@ def _run_phase(
         {
             **pre_metadata,
             **post_metadata,
+            "agent": selected_agent,
             "backend": selected_backend,
             "read_only": subagent.is_read_only,
             "permission_mode": permissions.permission_mode or "default",
@@ -318,7 +342,7 @@ def _run_phase(
 def _dry_run_output(phase: str) -> str:
     return (
         f"# Dry-run {phase.title()}\n\n"
-        "Claude was not invoked. This phase is simulated and no target repository files were modified."
+        "No agent was invoked. This phase is simulated and no target repository files were modified."
     )
 
 
@@ -415,6 +439,7 @@ def run_orchestrator(
     config_source: str = "explicit configuration",
     max_fix_attempts: int | None = None,
     dry_run: bool = False,
+    agent: str | None = None,
     backend: str | None = None,
     use_worktree: bool | None = None,
     branch_mode: str | None = None,
@@ -434,7 +459,7 @@ def run_orchestrator(
 ) -> OrchestrationResult:
     """Run the safe orchestration loop, or simulate it in ``dry_run`` mode.
 
-    A dry run writes only run metadata. It never calls Claude, runs verification,
+    A dry run writes only run metadata. It never calls an agent, runs verification,
     creates a worktree, or modifies the target repository. ``plan_only`` executes
     only the planner phase and then records read-only Git state.
     """
@@ -466,9 +491,12 @@ def run_orchestrator(
             raise ValueError("max_fix_attempts must be zero or greater")
         limits["max_fix_attempts"] = max_fix_attempts
 
+    selected_agent = _resolve_agent_provider(config, agent)
+    if selected_agent not in VALID_AGENT_PROVIDERS:
+        raise ValueError("Agent must be 'claude' or 'codex'")
     selected_backend = backend or backend_config.get("type", "cli")
-    if selected_backend not in {"cli", "sdk"}:
-        raise ValueError("Backend must be 'cli' or 'sdk'")
+    if selected_backend not in VALID_BACKENDS:
+        raise ValueError("Backend must be 'cli'")
     selected_remote = remote or git_config.get("remote", "origin")
     if not isinstance(selected_remote, str) or not selected_remote.strip():
         raise ValueError("Git remote must be a non-empty string")
@@ -526,6 +554,8 @@ def run_orchestrator(
     max_budget = limits.get("max_budget_usd")
     if max_budget is not None and not isinstance(max_budget, (int, float)):
         raise ValueError("limits.max_budget_usd must be numeric")
+    if max_budget is not None:
+        raise ValueError("limits.max_budget_usd is not supported in subscription CLI mode")
     max_changed_files = limits.get("max_changed_files", 8)
     if not isinstance(max_changed_files, int) or max_changed_files <= 0:
         raise ValueError("limits.max_changed_files must be a positive integer")
@@ -625,13 +655,14 @@ def run_orchestrator(
 
     logger.info("Prepared pipeline: %s", " -> ".join(PIPELINE_STEPS))
     logger.info("Target repository: %s", active_repo_path)
-    logger.info("Backend: %s (stream=%s)", selected_backend, stream)
+    logger.info("Agent: %s, backend: %s (stream=%s)", selected_agent, selected_backend, stream)
     if dry_run:
         logger.info(
-            "Dry run: Claude, verification, worktree creation, and target changes are disabled."
+            "Dry run: agent execution, verification, worktree creation, and target changes are disabled."
         )
 
     details: dict[str, str | int] = {
+        "agent": selected_agent,
         "backend": selected_backend,
         "launched from": launched_from,
         "run file": str(run_file_path) if run_file_path is not None else "not used",
@@ -660,7 +691,7 @@ def run_orchestrator(
     try:
         if setup_only:
             status = "dry-run-setup" if dry_run else "setup-complete"
-            details["next steps"] = "Run a planner phase separately; no Claude phase was invoked."
+            details["next steps"] = "Run a planner phase separately; no agent phase was invoked."
             _finalize_git_details(details, active_repo_path)
             report_path = write_report(run_dir, task, status, details)
             return OrchestrationResult(
@@ -695,7 +726,7 @@ def run_orchestrator(
                     {"dry-run": "exit code: skipped\nstdout:\n\nstderr:\nVerification was not run."},
                 )
             details["verification"] = "skipped (dry run)"
-            details["risks"] = "No Claude or verification command was executed."
+            details["risks"] = "No agent or verification command was executed."
             details["mode"] = "plan-only" if plan_only else "full-pipeline"
             status = "dry-run-plan-only" if plan_only else "dry-run"
         else:
@@ -713,6 +744,7 @@ def run_orchestrator(
                 prompt=planner_prompt,
                 task=task,
                 repo_path=active_repo_path,
+                agent=selected_agent,
                 backend=selected_backend,
                 subagent=subagents["planner"],
                 max_budget_usd=float(max_budget) if max_budget is not None else None,
@@ -730,6 +762,9 @@ def run_orchestrator(
                 _write_markdown(run_dir / "git_diff.patch", planner_diff or "# No Diff\n")
                 details["verification"] = "not run (plan-only)"
                 details["git status"] = planner_status or "working tree clean"
+                details["changed files"] = len(
+                    [line for line in planner_status.splitlines() if line]
+                )
                 details["diff lines"] = len(planner_diff.splitlines())
                 details["mode"] = "plan-only"
                 details["risks"] = "Planner output is advisory; review it before any implementation."
@@ -754,6 +789,7 @@ def run_orchestrator(
                 ),
                 task=task,
                 repo_path=active_repo_path,
+                agent=selected_agent,
                 backend=selected_backend,
                 subagent=subagents["implementer"],
                 max_budget_usd=float(max_budget) if max_budget is not None else None,
@@ -798,6 +834,7 @@ def run_orchestrator(
                     ),
                     task=task,
                     repo_path=active_repo_path,
+                    agent=selected_agent,
                     backend=selected_backend,
                     subagent=subagents["fixer"],
                     max_budget_usd=float(max_budget) if max_budget is not None else None,
@@ -831,6 +868,7 @@ def run_orchestrator(
                 ),
                 task=task,
                 repo_path=active_repo_path,
+                agent=selected_agent,
                 backend=selected_backend,
                 subagent=subagents["reviewer"],
                 max_budget_usd=float(max_budget) if max_budget is not None else None,

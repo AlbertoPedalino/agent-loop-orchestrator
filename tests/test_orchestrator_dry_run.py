@@ -11,6 +11,31 @@ from agent.subagents import SubagentConfig
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+def test_resolve_agent_provider_accepts_mapping_and_string_config() -> None:
+    assert orchestrator._resolve_agent_provider({}, None) == "claude"
+    assert (
+        orchestrator._resolve_agent_provider({"agent": {"provider": "codex"}}, None)
+        == "codex"
+    )
+    assert orchestrator._resolve_agent_provider({"agent": "codex"}, None) == "codex"
+    assert orchestrator._resolve_agent_provider({"agent": "claude"}, "codex") == "codex"
+
+
+def test_subscription_cli_mode_rejects_max_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("limits:\n  max_budget_usd: 1\n", encoding="utf-8")
+    monkeypatch.setattr(orchestrator, "ensure_git_repo", lambda path: True)
+
+    with pytest.raises(ValueError, match="subscription CLI mode"):
+        orchestrator.run_orchestrator(
+            repo_path=tmp_path,
+            task="test task",
+            config_path=config_path,
+        )
+
+
 def test_dry_run_does_not_call_claude_or_verification(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -114,6 +139,35 @@ def test_plan_only_runs_planner_and_skips_later_phases(
     assert phases == ["planner"]
     assert (run_dir / "planner_output.md").read_text(encoding="utf-8") == "safe plan\n"
     assert (run_dir / "report.md").is_file()
+
+
+def test_plan_only_reports_preexisting_changed_file_count(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    dirty_status = " M a.txt\n M b.txt\n?? c.txt"
+    monkeypatch.setattr(orchestrator, "ensure_git_repo", lambda path: True)
+    monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "agent/plan")
+    monkeypatch.setattr(orchestrator, "get_git_status", lambda path: dirty_status)
+    monkeypatch.setattr(orchestrator, "get_git_diff", lambda path: "")
+    monkeypatch.setattr(orchestrator, "_create_run_dir", lambda path: run_dir)
+    monkeypatch.setattr(
+        orchestrator,
+        "run_claude_prompt",
+        lambda prompt, repo_path, **kwargs: "safe plan",
+    )
+
+    result = orchestrator.run_orchestrator(
+        repo_path=tmp_path,
+        task="test task",
+        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        plan_only=True,
+    )
+
+    assert result.status == "plan-only-complete"
+    report = (run_dir / "report.md").read_text(encoding="utf-8")
+    assert "**changed files**: 3" in report
 
 
 def test_plan_only_writes_memory_from_emitted_block(
@@ -402,6 +456,7 @@ def test_write_phase_rejects_protected_branch_before_claude(
             prompt="impl",
             task="task",
             repo_path=tmp_path,
+            agent="claude",
             backend="cli",
             subagent=subagent,
             max_budget_usd=None,
@@ -427,6 +482,7 @@ def test_read_only_phase_allowed_on_protected_branch(
         prompt="plan",
         task="task",
         repo_path=tmp_path,
+        agent="claude",
         backend="cli",
         subagent=subagent,
         max_budget_usd=None,
@@ -436,3 +492,39 @@ def test_read_only_phase_allowed_on_protected_branch(
     assert output == "safe plan"
     assert captured["allowed_tools"] == ["Read", "Grep", "Glob"]
     assert captured["permission_mode"] is None
+
+
+def test_codex_phase_dispatches_to_codex_runner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    subagent = SubagentConfig(
+        "planner", "plan", ["Read", "Grep", "Glob"], 1, PROJECT_ROOT / "prompts" / "planner.md"
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "main")
+    monkeypatch.setattr(
+        orchestrator,
+        "run_claude_prompt",
+        lambda *args, **kwargs: pytest.fail("Claude runner must not handle Codex phases"),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_codex_prompt",
+        lambda prompt, repo_path, **kwargs: captured.update(kwargs) or "codex plan",
+    )
+
+    output = orchestrator._run_phase(
+        phase="planner",
+        prompt="plan",
+        task="task",
+        repo_path=tmp_path,
+        agent="codex",
+        backend="cli",
+        subagent=subagent,
+        max_budget_usd=None,
+        blocked_commands=["git push"],
+    )
+
+    assert output == "codex plan"
+    assert captured["allowed_tools"] == ["Read", "Grep", "Glob"]
+    assert captured["disallowed_tools"] == ["Bash(git push:*)"]

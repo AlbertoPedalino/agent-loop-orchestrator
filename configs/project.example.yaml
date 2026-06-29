@@ -3,12 +3,17 @@ project:
   name: example-service
   use_worktree: true
 
+agent:
+  provider: claude        # claude | codex
+
+backend:
+  type: cli               # local CLI only; no API/SDK backend
+
 limits:
   max_fix_attempts: 2
   max_changed_files: 5
   phase_timeout_seconds: 600
-  # max_budget_usd: set only when billing through the Anthropic API; leave unset
-  # on a Claude subscription (Pro/Plus/Max).
+  # max_budget_usd is intentionally unsupported in subscription CLI mode.
 
 verification:
   commands:

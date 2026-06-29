@@ -28,7 +28,7 @@ def post_command_hook(command: str, return_code: int, output: str) -> dict[str, 
 
 
 def pre_phase_hook(phase: str, repo_path: Path, task: str) -> dict[str, str]:
-    """Return phase metadata before dispatching a backend."""
+    """Return phase metadata before dispatching an agent provider."""
     return {
         "phase": phase,
         "repo_path": str(repo_path.expanduser().resolve()),
@@ -37,7 +37,7 @@ def pre_phase_hook(phase: str, repo_path: Path, task: str) -> dict[str, str]:
 
 
 def post_phase_hook(phase: str, output: str) -> dict[str, str]:
-    """Return phase metadata after a backend responds."""
+    """Return phase metadata after an agent provider responds."""
     return {
         "phase": phase,
         "output_length": str(len(output)),

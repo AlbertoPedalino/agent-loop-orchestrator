@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from agent.agent_options import VALID_AGENT_PROVIDERS, VALID_BACKENDS
 from agent.permissions import VALID_PERMISSION_MODES, is_read_only_tool_set
 
 
@@ -18,6 +19,7 @@ class SubagentConfig:
     allowed_tools: list[str]
     max_turns: int
     prompt_template: Path
+    agent: str | None = None
     backend: str | None = None
     permission_mode: str | None = None
 
@@ -57,26 +59,30 @@ def load_subagents_config(path: Path) -> dict[str, SubagentConfig]:
             raise ValueError(f"Subagent '{name}' requires an 'allowed_tools' string list")
         if not isinstance(max_turns, int) or max_turns <= 0:
             raise ValueError(f"Subagent '{name}' requires a positive integer 'max_turns'")
-        raw_prompt_path = Path(prompt_value)
-        prompt_path = raw_prompt_path if raw_prompt_path.is_absolute() else project_root / raw_prompt_path
-        prompt_path = prompt_path.resolve()
-        if not prompt_path.is_file():
-            raise ValueError(f"Subagent '{name}' prompt template does not exist: {prompt_path}")
+        agent = entry.get("agent")
+        if agent is not None and agent not in VALID_AGENT_PROVIDERS:
+            raise ValueError(f"Subagent '{name}' agent must be 'claude' or 'codex'")
         backend = entry.get("backend")
-        if backend is not None and backend not in {"cli", "sdk"}:
-            raise ValueError(f"Subagent '{name}' backend must be 'cli' or 'sdk'")
+        if backend is not None and backend not in VALID_BACKENDS:
+            raise ValueError(f"Subagent '{name}' backend must be 'cli'")
         permission_mode = entry.get("permission_mode")
         if permission_mode is not None and permission_mode not in VALID_PERMISSION_MODES:
             raise ValueError(
                 f"Subagent '{name}' permission_mode must be one of: "
                 f"{', '.join(sorted(VALID_PERMISSION_MODES))}"
             )
+        raw_prompt_path = Path(prompt_value)
+        prompt_path = raw_prompt_path if raw_prompt_path.is_absolute() else project_root / raw_prompt_path
+        prompt_path = prompt_path.resolve()
+        if not prompt_path.is_file():
+            raise ValueError(f"Subagent '{name}' prompt template does not exist: {prompt_path}")
         configs[name] = SubagentConfig(
             name=name,
             description=description,
             allowed_tools=tools,
             max_turns=max_turns,
             prompt_template=prompt_path,
+            agent=agent,
             backend=backend,
             permission_mode=permission_mode,
         )

@@ -40,6 +40,7 @@ def test_load_valid_run_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
     assert isinstance(config, RunFileConfig)
     assert config.repo_path == (tmp_path / ".." / "external" / "GM-Board").resolve()
+    assert config.agent == "claude"
     assert config.backend == "cli"
     assert config.use_worktree is True
     assert config.base_branch == "feature/x"
@@ -115,6 +116,56 @@ def test_default_backend_is_cli(tmp_path: Path) -> None:
         """,
     )
     assert load_run_file(run_file).backend == "cli"
+
+
+def test_default_agent_is_claude(tmp_path: Path) -> None:
+    run_file = _write_run_file(
+        tmp_path / "run.yaml",
+        """
+        repo_path: .
+        task: do work
+        """,
+    )
+    assert load_run_file(run_file).agent == "claude"
+
+
+def test_codex_agent_is_loaded(tmp_path: Path) -> None:
+    run_file = _write_run_file(
+        tmp_path / "run.yaml",
+        """
+        repo_path: .
+        agent: codex
+        task: do work
+        """,
+    )
+    assert load_run_file(run_file).agent == "codex"
+
+
+def test_sdk_backend_is_not_supported(tmp_path: Path) -> None:
+    run_file = _write_run_file(
+        tmp_path / "run.yaml",
+        """
+        repo_path: .
+        agent: claude
+        backend: sdk
+        task: do work
+        """,
+    )
+    with pytest.raises(ValueError, match="backend"):
+        load_run_file(run_file)
+
+
+def test_invalid_agent_fails(tmp_path: Path) -> None:
+    run_file = _write_run_file(
+        tmp_path / "run.yaml",
+        """
+        repo_path: .
+        agent: bogus
+        task: do work
+        """,
+    )
+    with pytest.raises(ValueError, match="agent"):
+        load_run_file(run_file)
 
 
 def test_invalid_backend_fails(tmp_path: Path) -> None:
@@ -219,6 +270,7 @@ def test_cli_run_file_invokes_same_orchestrator_path(
     assert captured["repo_path"] == target.resolve()
     assert captured["repo_path_source"] == "run-file repo_path"
     assert captured["task"] == "inspect things"
+    assert captured["agent"] == "claude"
     assert captured["backend"] == "cli"
     assert captured["plan_only"] is True
     assert captured["launched_from"] == "run-file"

@@ -1,1 +1,1 @@
-"""Tests for Claude Loop Orchestrator."""
+"""Tests for Agent Loop Orchestrator."""

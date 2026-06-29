@@ -21,6 +21,7 @@
 # The repo_path below is kept only to show the explicit-path variant.
 
 repo_path: ../external/GM-Board
+agent: claude
 backend: cli
 use_worktree: true
 base_branch: feature/unified-character-storage

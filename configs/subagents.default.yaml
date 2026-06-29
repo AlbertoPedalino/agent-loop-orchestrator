@@ -20,7 +20,7 @@ subagents:
       - Glob
     max_turns: 12
     prompt_template: prompts/implementer.md
-    # Auto-accept edits so the headless backend can apply changes; blocked
+    # Auto-accept edits so the headless CLI can apply changes; blocked
     # commands are still denied at the tool boundary.
     permission_mode: acceptEdits
 

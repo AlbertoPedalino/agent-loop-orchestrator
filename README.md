@@ -1,6 +1,6 @@
-# Claude Loop Orchestrator
+# Agent Loop Orchestrator
 
-`claude-loop-orchestrator` is a lightweight external control plane for a bounded Claude-assisted repository workflow:
+`claude-loop-orchestrator` is a lightweight external control plane for a bounded Claude- or Codex-assisted repository workflow:
 
 ```text
 task -> target validation -> optional worktree -> planner -> implementer
@@ -14,54 +14,78 @@ It is designed to keep orchestration policy outside the target repository. It do
 - `agent/main.py` provides the CLI.
 - `agent/orchestrator.py` owns phase sequencing, run artifacts, verification, and reporting.
 - `agent/claude_runner.py` runs Claude Code safely as `claude -p <prompt>` with an argument list and no shell.
-- `agent/sdk_runner.py` is an optional lazy adapter for the Claude Agent SDK.
+- `agent/codex_runner.py` runs Codex safely as `codex exec`, sends the prompt on stdin, and reads the final answer from `--output-last-message`.
 - `agent/hooks.py` provides deterministic pre/post command and phase guardrails.
-- `agent/subagents.py` loads named phase settings from YAML; it does not create recursive SDK subagents.
+- `agent/subagents.py` loads named phase settings from YAML.
 - `agent/git_utils.py` creates local-only worktrees and rejects protected agent branch names.
 
-## Backends
+## Agents and backends
 
-The default backend is the Claude Code CLI. A normal install does not require the Agent SDK:
+The default agent provider is Claude Code through the CLI. Select a provider per run with:
+
+```bash
+python -m agent.main --repo-path . --task "test task" -claude
+python -m agent.main --repo-path . --task "test task" -codex
+```
+
+Equivalent explicit form:
+
+```bash
+python -m agent.main --repo-path . --task "test task" --agent codex
+```
+
+`agent` chooses the provider:
+
+- `claude` - Claude Code.
+- `codex` - Codex CLI through `codex exec`.
+
+`backend` is kept for run-file compatibility and is always local CLI execution:
+
+- `cli` - Claude Code CLI for `agent: claude`, Codex CLI for `agent: codex`.
+
+The orchestrator does not use API clients or SDK backends. It invokes the local
+CLIs you have authenticated with your subscription plan:
 
 ```bash
 python -m pip install -e ".[dev]"
 ```
 
-Install the optional SDK adapter only when needed:
+Target-local config can choose the default provider:
 
-```bash
-python -m pip install -e ".[dev,sdk]"
+```yaml
+agent:
+  provider: claude  # claude | codex
+
+backend:
+  type: cli         # local CLI only; no API/SDK backend
 ```
-
-The SDK is imported only when `--backend sdk` is selected. The adapter intentionally fails clearly if the installed SDK does not expose the supported `query`/`ClaudeAgentOptions` boundary.
 
 ## Terminal output
 
-By default the CLI backend streams Claude's activity live: each phase logs its
+By default the CLI backends stream agent activity live: each phase logs its
 start, every tool call (e.g. `🔧 Read(file_path=...)`), assistant text, and a
 final `✔ done (turns=…, cost=$…)` line as it happens, instead of going silent
 until the phase ends. Logs are written to `stderr`; the final run-directory and
 report paths are printed to `stdout`, so the two never mix.
 
-- `--verbose` — add DEBUG detail (raw stream lines, per-message SDK events).
+- `--verbose` — add DEBUG detail (raw stream lines and events).
 - `--quiet` — warnings and errors only.
 - `--no-stream` — buffer each phase until it ends (no live tool log).
 
-These are display-only flags and may be combined with `--run-file`. The SDK
-backend logs each message as it arrives regardless of `--no-stream`.
+These are display-only flags and may be combined with `--run-file`.
 
 ## Guardrails and subagents
 
 Blocked command substrings are configured in YAML. They are enforced in two places:
 
 1. **Verification commands** the orchestrator runs itself are checked before execution (deterministic, in `agent/policies.py`).
-2. **The agent's own tools** receive the same block list as backend deny rules (`Bash(<command>:*)`), passed via `--disallowedTools` (CLI) or `disallowed_tools` (SDK). The SDK receives the rules as a native list, so multi-word denials are exact; CLI matching is prefix-based and best-effort for chained or wrapped commands. Prefer the SDK backend when hard enforcement matters.
+2. **The agent's own tools** receive the same block list as provider policy. Claude receives CLI deny rules (`Bash(<command>:*)`) via `--disallowedTools`. Claude CLI matching is prefix-based and best-effort for chained or wrapped commands. Codex receives the policy in the prompt and runs read-only phases in a `read-only` sandbox and write phases in a `workspace-write` sandbox.
 
 Defaults block commits, pushes, W&B sweeps, notebook execution, destructive Docker teardown, and recursive deletion.
 
-`configs/subagents.default.yaml` defines the planner, implementer, fixer, and reviewer with their `allowed_tools` and optional `permission_mode`. These are now enforced on both backends: each phase is launched with `--allowedTools`/`allowed_tools`, so planner and reviewer (no write tools) physically cannot edit, and implementer/fixer run with `permission_mode: acceptEdits` so the headless backend can apply changes. A phase whose allowed tools include no write-capable tool (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Bash`) is treated as read-only.
+`configs/subagents.default.yaml` defines the planner, implementer, fixer, and reviewer with their `allowed_tools`, optional `agent`, optional `backend`, and optional `permission_mode`. Claude phases are launched with `--allowedTools`, so planner and reviewer (no write tools) physically cannot edit, and implementer/fixer run with `permission_mode: acceptEdits` so the headless CLI can apply changes. Codex phases use the same mutability model to choose `read-only` vs `workspace-write` sandbox. A phase whose allowed tools include no write-capable tool (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Bash`) is treated as read-only.
 
-Each run records the resolved per-phase guardrails (backend, read-only flag, permission mode, allowed/disallowed tools) in `runs/<timestamp>/phase_events.jsonl`.
+Each run records the resolved per-phase guardrails (agent, backend, read-only flag, permission mode, allowed/disallowed tools) in `runs/<timestamp>/phase_events.jsonl`.
 
 ## Worktree isolation
 
@@ -105,6 +129,7 @@ C:\Users\alber\Documents\dev\agent-loop-orchestrator\.venv\Scripts\python.exe -m
 ```
 
 ```yaml
+agent: claude
 backend: cli
 use_worktree: false
 branch_mode: in_place
@@ -128,6 +153,7 @@ C:\Users\alber\Documents\dev\agent-loop-orchestrator\.venv\Scripts\python.exe -m
 ```
 
 ```yaml
+agent: codex
 backend: cli
 use_worktree: false
 branch_mode: in_place
@@ -148,7 +174,7 @@ This creates/checks out `agent/improve-action-chips` from `feature/unified-chara
 So a run does not re-explore the repository from scratch every time, the loop keeps a curated `.agent-loop/memory.md` in the target repository with what it has learned (architecture, key files, gotchas). Two halves:
 
 1. **Inject** — before each phase, the orchestrator prepends the current memory to the prompt, so the agent verifies known areas instead of rediscovering them.
-2. **Update** — the final read-only phase (planner in `plan_only`, reviewer in a full loop) ends its reply with a fenced ` ```memory ``` ` block; the orchestrator extracts it and rewrites `memory.md`. No extra Claude call is made, and phases never edit the file directly, so read-only phases stay read-only and every change is a reviewable Git diff.
+2. **Update** — the final read-only phase (planner in `plan_only`, reviewer in a full loop) ends its reply with a fenced ` ```memory ``` ` block; the orchestrator extracts it and rewrites `memory.md`. No extra agent call is made, and phases never edit the file directly, so read-only phases stay read-only and every change is a reviewable Git diff.
 
 Memory is stored in the main repository (not a throwaway worktree) so it persists across runs and branches. Configure it under `memory` (defaults shown):
 
@@ -173,7 +199,7 @@ GM-Board/
 
 ## Dry run
 
-Dry-run writes run metadata under `runs/<timestamp>/` but does not call Claude, run verification commands, create a worktree, or modify the target repository:
+Dry-run writes run metadata under `runs/<timestamp>/` but does not call Claude or Codex, run verification commands, create a worktree, or modify the target repository:
 
 ```bash
 python -m agent.main --repo-path . --task "test task" --dry-run
@@ -183,7 +209,7 @@ Run artifacts are ignored by Git except `runs/.gitkeep`.
 
 ## Plan-only mode
 
-Use `--plan-only` for the first real Claude interaction with an external repository. It creates run metadata, invokes only the read-only planner, captures Git status/diff, writes `planner_output.md`, and stops before implementation, verification, fixing, or review. It is incompatible with `--setup-only`; combined with `--dry-run`, it simulates the same plan-only artifacts without calling Claude.
+Use `--plan-only` for the first real agent interaction with an external repository. It creates run metadata, invokes only the read-only planner, captures Git status/diff, writes `planner_output.md`, and stops before implementation, verification, fixing, or review. It is incompatible with `--setup-only`; combined with `--dry-run`, it simulates the same plan-only artifacts without calling an agent.
 
 The planner prompt explicitly requires plan-only behavior: no file edits, modification commands, commits, or pushes. With `--use-worktree`, plan-only reuses the selected existing worktree when one is present, otherwise it safely creates the configured local worktree first.
 
@@ -223,6 +249,7 @@ For a target repository with local configuration, no `--config` flag is needed:
 .\.venv\Scripts\python.exe -m agent.main `
   --repo-path ../external/GM-Board `
   --task "Improve action tab chip rendering while preserving behavior." `
+  --agent claude `
   --backend cli `
   --use-worktree `
   --base-branch feature/unified-character-storage `
@@ -286,7 +313,8 @@ three sources it came from (`run_source.md` and `report.md`).
 ```yaml
 repo_path: string | null # optional; defaults to --repo-path or the working dir
 config: string | null    # optional; omit to keep target-local config discovery
-backend: cli | sdk       # defaults to cli
+agent: claude | codex    # defaults to claude
+backend: cli             # defaults to cli; local CLI only
 use_worktree: boolean    # defaults to false; true implies branch_mode: worktree
 branch_mode: worktree | in_place | none  # optional; see "In-place agent branch"
 create_branch: auto | always | never     # optional; defaults to auto
@@ -301,8 +329,8 @@ task_file: string | null
 ```
 
 Rules: `repo_path` is optional (see the resolution order above); exactly one of
-`task` or `task_file` is required; booleans default to `false`; `backend` defaults
-to `cli`. When `config` is omitted, the usual target-local discovery applies
+`task` or `task_file` is required; booleans default to `false`; `agent` defaults
+to `claude`; `backend` defaults to `cli`. When `config` is omitted, the usual target-local discovery applies
 (`.agent-loop/config.yaml`, then `.agent-loop.yaml`, then the generic fallback).
 
 ### Path handling
@@ -315,7 +343,7 @@ behavior of passing the same paths directly on the command line.
 ### Exclusivity
 
 `--run-file` is mutually exclusive with every other run-parameter flag
-(`--task`, `--task-file`, `--config`, `--backend`, `--use-worktree`,
+(`--task`, `--task-file`, `--config`, `--agent`, `-claude`, `-codex`, `--backend`, `--use-worktree`,
 `--branch-mode`, `--create-branch`, `--allow-dirty`, `--base-branch`,
 `--agent-branch`, `--remote`, `--worktree-root`,
 `--max-fix-attempts`, `--plan-only`, `--setup-only`, `--dry-run`). The only
@@ -330,6 +358,7 @@ in `run_source.md` and `report.md`.
 
 ```yaml
 repo_path: ../external/GM-Board
+agent: claude
 backend: cli
 use_worktree: true
 base_branch: feature/unified-character-storage
@@ -345,6 +374,7 @@ task: |
 
 ```yaml
 repo_path: ../external/GM-Board
+agent: codex
 backend: cli
 use_worktree: true
 base_branch: feature/unified-character-storage
@@ -358,7 +388,7 @@ task: |
 
 - Do not use this tool to bypass target-repository policy.
 - Review all proposed changes and reports before committing.
-- Do not enable real Claude execution in automated tests.
+- Do not enable real Claude or Codex execution in automated tests.
 - The orchestrator never performs `git commit` or `git push`.
 - Worktrees are never removed automatically in this version.
 
@@ -378,6 +408,5 @@ When using the repository virtual environment on Windows:
 
 ## Roadmap
 
-1. Enforce blocked commands via an SDK `PreToolUse` hook (exact substring match) so multi-word denials are robust on the SDK backend, not only prefix-based.
-2. Add configurable review gates before verification and branch handoff.
-3. Add optional cleanup policies that require explicit user confirmation.
+1. Add configurable review gates before verification and branch handoff.
+2. Add optional cleanup policies that require explicit user confirmation.

@@ -21,6 +21,7 @@ def test_default_subagents_load_with_read_only_roles() -> None:
     assert configs["reviewer"].is_read_only
     assert not configs["implementer"].is_read_only
     assert not configs["fixer"].is_read_only
+    assert configs["planner"].agent is None
     assert configs["planner"].permission_mode is None
     assert configs["implementer"].permission_mode == "acceptEdits"
     assert configs["fixer"].permission_mode == "acceptEdits"
@@ -41,6 +42,24 @@ def test_invalid_permission_mode_fails_clearly(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="permission_mode"):
+        load_subagents_config(config_path)
+
+
+def test_invalid_agent_fails_clearly(tmp_path: Path) -> None:
+    config_path = tmp_path / "configs" / "bad-agent.yaml"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        "subagents:\n"
+        "  planner:\n"
+        "    description: plan\n"
+        "    allowed_tools: [Read]\n"
+        "    max_turns: 2\n"
+        "    prompt_template: prompts/planner.md\n"
+        "    agent: bogus\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="agent"):
         load_subagents_config(config_path)
 
 

@@ -1,1 +1,1 @@
-"""Claude Loop Orchestrator package."""
+"""Agent Loop Orchestrator package."""

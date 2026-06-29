@@ -30,8 +30,9 @@ _TOOL_INPUT_KEYS = (
 def configure_logging(*, verbose: bool = False, quiet: bool = False) -> logging.Logger:
     """Configure and return the shared ``agent`` logger.
 
-    ``quiet`` shows warnings and errors only; ``verbose`` adds DEBUG (per-message
-    SDK events, raw stream lines that fail to parse); the default is INFO.
+    ``quiet`` shows warnings and errors only; ``verbose`` adds DEBUG
+    (per-message events, raw stream lines that fail to parse); the default is
+    INFO.
     """
     level = logging.WARNING if quiet else (logging.DEBUG if verbose else logging.INFO)
     logger = logging.getLogger(_LOGGER_NAME)

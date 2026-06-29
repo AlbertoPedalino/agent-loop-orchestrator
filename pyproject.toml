@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "claude-loop-orchestrator"
 version = "0.1.0"
-description = "A lightweight external orchestrator skeleton for controlled Claude Code loops."
+description = "A lightweight external orchestrator skeleton for controlled Claude/Codex loops."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -16,9 +16,6 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.5",
-]
-sdk = [
-    "claude-agent-sdk",
 ]
 
 [tool.pytest.ini_options]

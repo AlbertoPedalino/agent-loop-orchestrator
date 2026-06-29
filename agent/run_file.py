@@ -17,6 +17,8 @@ from pathlib import Path
 
 import yaml
 
+from agent.agent_options import VALID_AGENT_PROVIDERS, VALID_BACKENDS
+
 
 _BOOLEAN_FIELDS = ("use_worktree", "plan_only", "setup_only", "dry_run", "allow_dirty")
 _BRANCH_MODES = ("worktree", "in_place", "none")
@@ -25,6 +27,7 @@ _KNOWN_FIELDS = frozenset(
     {
         "repo_path",
         "config",
+        "agent",
         "backend",
         "use_worktree",
         "branch_mode",
@@ -47,6 +50,7 @@ class RunFileConfig:
 
     repo_path: Path | None
     config: Path | None
+    agent: str
     backend: str
     use_worktree: bool
     branch_mode: str | None
@@ -82,7 +86,8 @@ def load_run_file(path: Path) -> RunFileConfig:
       explicit ``--repo-path`` or the current working directory);
     * either ``task`` or ``task_file`` is required, and they are mutually
       exclusive;
-    * ``backend`` defaults to ``cli`` and must be ``cli`` or ``sdk``;
+    * ``agent`` defaults to ``claude`` and must be ``claude`` or ``codex``;
+    * ``backend`` defaults to ``cli`` and must be ``cli``;
     * boolean fields default to ``False``;
     * ``config`` is optional, so target-local config discovery still applies
       when it is omitted.
@@ -114,9 +119,13 @@ def load_run_file(path: Path) -> RunFileConfig:
     if not has_task and not has_task_file:
         raise ValueError("Run file must define either 'task' or 'task_file'")
 
+    agent_value = data.get("agent", "claude")
+    if agent_value not in VALID_AGENT_PROVIDERS:
+        raise ValueError("Run file 'agent' must be 'claude' or 'codex'")
+
     backend_value = data.get("backend", "cli")
-    if backend_value not in {"cli", "sdk"}:
-        raise ValueError("Run file 'backend' must be 'cli' or 'sdk'")
+    if backend_value not in VALID_BACKENDS:
+        raise ValueError("Run file 'backend' must be 'cli'")
 
     booleans: dict[str, bool] = {}
     for field in _BOOLEAN_FIELDS:
@@ -141,6 +150,7 @@ def load_run_file(path: Path) -> RunFileConfig:
     return RunFileConfig(
         repo_path=_resolve_path(repo_path_value) if repo_path_value else None,
         config=_resolve_path(config_value) if config_value else None,
+        agent=agent_value,
         backend=backend_value,
         use_worktree=booleans["use_worktree"],
         branch_mode=branch_mode_value,

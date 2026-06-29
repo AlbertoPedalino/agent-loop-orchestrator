@@ -2,8 +2,11 @@ project:
   name: default
   use_worktree: false
 
+agent:
+  provider: claude        # claude | codex
+
 backend:
-  type: cli
+  type: cli               # local CLI only; no API/SDK backend
 
 git:
   remote: origin
@@ -20,12 +23,8 @@ git:
 limits:
   max_fix_attempts: 3
   max_changed_files: 8
-  phase_timeout_seconds: 600   # per-phase backend timeout
-  # max_budget_usd: API-billing dollar cap (--max-budget-usd). Leave UNSET on a
-  # Claude subscription (Pro/Plus/Max): there is no per-dollar billing, so a cap
-  # only stops a phase early at a phantom cost. Your real limit is the plan's
-  # usage window. Set it only when billing through the Anthropic API.
-  # max_budget_usd: 5.0
+  phase_timeout_seconds: 600   # per-phase CLI timeout
+  # max_budget_usd is intentionally unsupported in subscription CLI mode.
   # Per-phase turn caps live in configs/subagents.default.yaml (max_turns).
 
 memory:
