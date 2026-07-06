@@ -71,7 +71,10 @@ def main() -> int:
 
     try:
         if args.command == "add":
-            destination = enqueue(args.queue_dir, args.task_file)
+            # A task file without repo_path targets the repository you launch
+            # `add` from, mirroring run-file cwd semantics; the queued copy is
+            # stamped so workers stay location-independent.
+            destination = enqueue(args.queue_dir, args.task_file, default_repo_path=Path.cwd())
             print(f"Enqueued: {destination}")
         elif args.command == "run":
             summary = run_queue(

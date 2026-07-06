@@ -86,6 +86,39 @@ def test_enqueue_validates_and_copies(tmp_path: Path) -> None:
     assert list_queue(queue_dir)["queued"] == [destination.name]
 
 
+def test_enqueue_stamps_default_repo_path(tmp_path: Path) -> None:
+    """A task without repo_path becomes self-contained at enqueue time."""
+    queue_dir = tmp_path / "queue"
+    target_repo = tmp_path / "target-repo"
+    target_repo.mkdir()
+    source = tmp_path / "portable-task.yaml"
+    source.write_text(yaml.safe_dump({"task": "do the thing"}), encoding="utf-8")
+
+    destination = enqueue(queue_dir, source, default_repo_path=target_repo)
+
+    stamped = parse_queue_task(destination)
+    assert stamped.run.repo_path == target_repo.resolve()
+    # The source file is never modified.
+    assert "repo_path" not in yaml.safe_load(source.read_text(encoding="utf-8"))
+
+
+def test_enqueue_without_repo_path_or_default_rejects(tmp_path: Path) -> None:
+    source = tmp_path / "task.yaml"
+    source.write_text(yaml.safe_dump({"task": "x"}), encoding="utf-8")
+
+    with pytest.raises(QueueTaskError, match="repo_path"):
+        enqueue(tmp_path / "queue", source)
+
+
+def test_enqueue_explicit_repo_path_wins_over_default(tmp_path: Path) -> None:
+    queue_dir = tmp_path / "queue"
+    source = _write_task(tmp_path / "task.yaml")  # has repo_path C:/repos/example
+
+    destination = enqueue(queue_dir, source, default_repo_path=tmp_path)
+
+    assert parse_queue_task(destination).run.repo_path == Path("C:/repos/example").resolve()
+
+
 def test_claim_orders_by_priority_then_name(tmp_path: Path) -> None:
     queue_dir = tmp_path / "queue"
     queued = queue_dir / "queued"

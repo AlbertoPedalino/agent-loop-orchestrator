@@ -141,21 +141,31 @@ def _require_int(data: dict[str, Any], key: str, default: int, minimum: int) -> 
     return value
 
 
-def parse_queue_task(path: Path) -> QueueTask:
-    """Load and validate one queue task file."""
-    resolved = path.expanduser().resolve()
-    if not resolved.is_file():
-        raise FileNotFoundError(f"Queue task file not found: {resolved}")
+def _load_task_data(path: Path) -> dict[str, Any]:
+    """Read a task file into a mapping, normalizing load errors."""
+    if not path.is_file():
+        raise FileNotFoundError(f"Queue task file not found: {path}")
     try:
-        with resolved.open(encoding="utf-8") as handle:
+        with path.open(encoding="utf-8") as handle:
             data = yaml.safe_load(handle)
     except yaml.YAMLError as error:
         raise QueueTaskError(f"Queue task file is not valid YAML: {error}") from error
     if data is None:
-        raise QueueTaskError(f"Queue task file is empty: {resolved}")
+        raise QueueTaskError(f"Queue task file is empty: {path}")
     if not isinstance(data, dict):
         raise QueueTaskError("Queue task root must be a YAML mapping")
+    return data
 
+
+def parse_queue_task(path: Path) -> QueueTask:
+    """Load and validate one queue task file."""
+    resolved = path.expanduser().resolve()
+    data = _load_task_data(resolved)
+    return _parse_queue_data(data, resolved)
+
+
+def _parse_queue_data(data: dict[str, Any], resolved: Path) -> QueueTask:
+    """Validate an already-loaded queue task mapping."""
     queue_meta = {key: data[key] for key in _QUEUE_ONLY_FIELDS if key in data}
     run_data = {key: value for key, value in data.items() if key not in _QUEUE_ONLY_FIELDS}
     run = parse_run_data(run_data)
@@ -224,14 +234,33 @@ def _unique_destination(directory: Path, name: str) -> Path:
     return candidate
 
 
-def enqueue(queue_dir: Path, source: Path) -> Path:
-    """Validate *source* and copy it into ``queued/`` under a unique name."""
-    task = parse_queue_task(source)
+def enqueue(queue_dir: Path, source: Path, *, default_repo_path: Path | None = None) -> Path:
+    """Validate *source* and copy it into ``queued/`` under a unique name.
+
+    A task file kept inside its target repository can omit ``repo_path`` and
+    stay location-independent; *default_repo_path* (the CLI passes the launch
+    directory) is stamped into the queued copy at enqueue time, so the copy is
+    self-contained and workers can run from anywhere. The source file is never
+    modified.
+    """
+    resolved_source = source.expanduser().resolve()
+    data = _load_task_data(resolved_source)
+    stamped = False
+    if data.get("repo_path") is None and default_repo_path is not None:
+        data = {**data, "repo_path": str(default_repo_path.expanduser().resolve())}
+        stamped = True
+    task = _parse_queue_data(data, resolved_source)
     dirs = queue_state_dirs(queue_dir)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     destination = _unique_destination(dirs["queued"], f"{timestamp}-{task.path.stem}.yaml")
-    destination.write_text(task.path.read_text(encoding="utf-8"), encoding="utf-8")
-    logger.info("Enqueued %s -> %s", source, destination)
+    if stamped:
+        destination.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+        logger.info(
+            "Enqueued %s -> %s (repo_path stamped: %s)", source, destination, data["repo_path"]
+        )
+    else:
+        destination.write_text(resolved_source.read_text(encoding="utf-8"), encoding="utf-8")
+        logger.info("Enqueued %s -> %s", source, destination)
     return destination
 
 

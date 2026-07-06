@@ -393,10 +393,18 @@ task: |
 
 ## Task queue
 
-For batches of tasks, a file-based queue lives under `tasks/queue/` (gitignored) with four state directories: `queued/`, `running/`, `done/`, and `failed/`. A queue task file is a normal run file plus queue metadata, and must set `repo_path` explicitly:
+For batches of tasks, a file-based queue lives under `tasks/queue/` (gitignored) with four state directories: `queued/`, `running/`, `done/`, and `failed/`. A queue task file is a normal run file plus queue metadata. Every *queued* copy must carry an explicit `repo_path` so workers can run from anywhere — but your source task file may omit it: `queue_cli add` stamps the directory you launch it from into the queued copy (mirroring run-file cwd semantics) and never modifies the source file. Recommended layout: keep task files target-local (`<target>/.agent-loop/tasks/`), keep the queue central in the orchestrator, and enqueue from inside the target repository:
+
+```bash
+cd <target-repo>
+<orchestrator>/.venv/Scripts/python.exe -m agent.queue_cli \
+  --queue-dir <orchestrator>/tasks/queue add .agent-loop/tasks/my-task.yaml
+```
+
+Task file fields:
 
 ```yaml
-repo_path: ../external/GM-Board
+repo_path: ../external/GM-Board   # optional in the source file; stamped from cwd by `add`
 task: Fix the flaky character-sheet test.
 use_worktree: true
 base_branch: main

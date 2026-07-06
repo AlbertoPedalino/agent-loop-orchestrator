@@ -46,9 +46,31 @@ def test_add_and_list(
     assert "my-task" in output
 
 
+def test_add_stamps_cwd_when_repo_path_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Target-local task files omit repo_path; `add` stamps the launch cwd."""
+    from agent.queue import parse_queue_task
+
+    queue_dir = tmp_path / "queue"
+    target_repo = tmp_path / "target-repo"
+    target_repo.mkdir()
+    source = target_repo / "task.yaml"
+    source.write_text(yaml.safe_dump({"task": "portable"}), encoding="utf-8")
+    monkeypatch.chdir(target_repo)
+    monkeypatch.setattr(
+        "sys.argv", ["queue_cli", "--queue-dir", str(queue_dir), "add", str(source)]
+    )
+
+    assert main() == 0
+    queued = list((queue_dir / "queued").glob("*.yaml"))
+    assert len(queued) == 1
+    assert parse_queue_task(queued[0]).run.repo_path == target_repo.resolve()
+
+
 def test_add_rejects_invalid_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     bad = tmp_path / "bad.yaml"
-    bad.write_text(yaml.safe_dump({"task": "missing repo path"}), encoding="utf-8")
+    bad.write_text(yaml.safe_dump({"task": ["not", "a", "string"]}), encoding="utf-8")
     monkeypatch.setattr(
         "sys.argv", ["queue_cli", "--queue-dir", str(tmp_path / "queue"), "add", str(bad)]
     )
