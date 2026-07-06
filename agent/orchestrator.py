@@ -28,6 +28,7 @@ from agent.git_utils import (
     get_git_status,
     is_protected_branch,
     remote_branch_exists,
+    remove_worktree,
 )
 from agent.hooks import post_phase_hook, pre_phase_hook
 from agent.memory import (
@@ -135,6 +136,13 @@ def _mapping(config: dict[str, Any], key: str) -> dict[str, Any]:
     value = config.setdefault(key, {})
     if not isinstance(value, dict):
         raise ValueError(f"Configuration '{key}' must be a YAML mapping")
+    return value
+
+
+def _optional_bool(config: dict[str, Any], key: str, default: bool = False) -> bool:
+    value = config.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"Configuration '{key}' must be a boolean")
     return value
 
 
@@ -494,6 +502,42 @@ def _finalize_git_details(details: dict[str, str | int], repo_path: Path) -> Non
     details["working tree dirty at end"] = "yes" if get_git_status(repo_path).strip() else "no"
 
 
+def _cleanup_worktree_if_requested(
+    *,
+    details: dict[str, str | int],
+    source_repo_path: Path,
+    worktree_path: Path | None,
+    created_for_run: bool,
+    requested: bool,
+) -> None:
+    """Best-effort opt-in cleanup for clean worktrees created by this run."""
+    if not requested:
+        details["worktree cleanup"] = "not requested"
+        return
+    if worktree_path is None:
+        details["worktree cleanup"] = "not applicable"
+        return
+    if not created_for_run:
+        details["worktree cleanup"] = "skipped (worktree was reused)"
+        return
+
+    try:
+        resolved_source = source_repo_path.expanduser().resolve()
+        resolved_worktree = worktree_path.expanduser().resolve()
+        if resolved_source == resolved_worktree:
+            details["worktree cleanup"] = "skipped (source repository)"
+            return
+        if get_git_status(resolved_worktree).strip():
+            details["worktree cleanup"] = "skipped (working tree dirty)"
+            return
+        remove_worktree(resolved_source, resolved_worktree)
+    except Exception as error:  # noqa: BLE001 - cleanup must not mask run result
+        logger.warning("Worktree cleanup failed for %s: %s", worktree_path, error)
+        details["worktree cleanup"] = f"failed: {error}"
+    else:
+        details["worktree cleanup"] = f"removed {resolved_worktree}"
+
+
 def run_orchestrator(
     *,
     repo_path: Path,
@@ -586,6 +630,8 @@ def run_orchestrator(
     selected_allow_dirty = (
         allow_dirty if allow_dirty is not None else bool(git_config.get("allow_dirty", False))
     )
+    delete_worktree_on_success = _optional_bool(git_config, "delete_worktree_on_success")
+    delete_worktree_on_failure = _optional_bool(git_config, "delete_worktree_on_failure")
     selected_base_branch = base_branch or git_config.get("base_branch")
     selected_agent_branch = agent_branch or git_config.get("agent_branch")
     wants_in_place_branch = selected_branch_mode == "in_place" and _wants_in_place_branch(
@@ -672,6 +718,8 @@ def run_orchestrator(
 
     active_repo_path = resolved_repo_path
     worktree_path: Path | None = None
+    worktree_created = False
+    reused_worktree = False
     current_branch = get_current_branch(resolved_repo_path)
     original_branch = current_branch
     branch_created = False
@@ -704,6 +752,8 @@ def run_orchestrator(
             )
             if reused_worktree:
                 worktree_note = f"using existing worktree at {worktree_path}"
+            else:
+                worktree_created = True
             active_repo_path = worktree_path
             current_branch = get_current_branch(active_repo_path)
     elif wants_in_place_branch:
@@ -755,6 +805,9 @@ def run_orchestrator(
         "in-place branch": in_place_note,
         "starting branch": current_branch,
         "worktree": str(worktree_path) if worktree_path else worktree_note,
+        "worktree created": "yes" if worktree_created else "no",
+        "worktree reused": "yes" if reused_worktree else "no",
+        "worktree cleanup": "not requested",
         "verification": "not run",
         "fix attempts": 0,
         "changed files": 0,
@@ -767,6 +820,13 @@ def run_orchestrator(
             status = "dry-run-setup" if dry_run else "setup-complete"
             details["next steps"] = "Run a planner phase separately; no agent phase was invoked."
             _finalize_git_details(details, active_repo_path)
+            _cleanup_worktree_if_requested(
+                details=details,
+                source_repo_path=resolved_repo_path,
+                worktree_path=worktree_path,
+                created_for_run=worktree_created,
+                requested=delete_worktree_on_success,
+            )
             report_path = write_report(run_dir, task, status, details)
             return OrchestrationResult(
                 run_dir, report_path, status, active_repo_path, worktree_path
@@ -864,6 +924,13 @@ def run_orchestrator(
                     memory_config, task=task, status=status, fix_attempts=0, run_dir=run_dir
                 )
                 _finalize_git_details(details, active_repo_path)
+                _cleanup_worktree_if_requested(
+                    details=details,
+                    source_repo_path=resolved_repo_path,
+                    worktree_path=worktree_path,
+                    created_for_run=worktree_created,
+                    requested=delete_worktree_on_success,
+                )
                 report_path = write_report(run_dir, task, status, details)
                 return OrchestrationResult(
                     run_dir, report_path, status, active_repo_path, worktree_path
@@ -998,6 +1065,15 @@ def run_orchestrator(
             )
 
         _finalize_git_details(details, active_repo_path)
+        _cleanup_worktree_if_requested(
+            details=details,
+            source_repo_path=resolved_repo_path,
+            worktree_path=worktree_path,
+            created_for_run=worktree_created,
+            requested=delete_worktree_on_success
+            if status in {"completed", "plan-only-complete", "setup-complete"}
+            else delete_worktree_on_failure,
+        )
         report_path = write_report(run_dir, task, status, details)
         return OrchestrationResult(
             run_dir,
@@ -1014,5 +1090,12 @@ def run_orchestrator(
                 memory_config, task=task, status="failed", fix_attempts=0, run_dir=run_dir
             )
         _finalize_git_details(details, active_repo_path)
+        _cleanup_worktree_if_requested(
+            details=details,
+            source_repo_path=resolved_repo_path,
+            worktree_path=worktree_path,
+            created_for_run=worktree_created,
+            requested=delete_worktree_on_failure,
+        )
         write_report(run_dir, task, "failed", details)
         raise

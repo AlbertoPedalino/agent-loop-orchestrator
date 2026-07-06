@@ -11,6 +11,32 @@ from agent.subagents import SubagentConfig
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _write_cleanup_config(
+    tmp_path: Path, *, delete_on_success: bool = False, delete_on_failure: bool = False
+) -> Path:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "project:",
+                "  name: cleanup-test",
+                "backend:",
+                "  type: cli",
+                "git:",
+                f"  delete_worktree_on_success: {str(delete_on_success).lower()}",
+                f"  delete_worktree_on_failure: {str(delete_on_failure).lower()}",
+                "limits:",
+                "  max_changed_files: 8",
+                "verification:",
+                "  commands: []",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
 def test_resolve_agent_provider_accepts_mapping_and_string_config() -> None:
     assert orchestrator._resolve_agent_provider({}, None) == "claude"
     assert (
@@ -435,6 +461,168 @@ def test_full_run_creates_worktree_when_missing(
     assert result.status == "completed"
     assert result.worktree_path == worktree
     assert phases == ["planner", "implementer", "reviewer"]
+
+
+def test_created_clean_worktree_is_removed_on_success_when_configured(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run_dir = tmp_path / "run"
+    worktree = tmp_path / "new-worktree"
+    config_path = _write_cleanup_config(tmp_path, delete_on_success=True)
+    run_dir.mkdir()
+    worktree.mkdir()
+    removed: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(orchestrator, "ensure_git_repo", lambda path: True)
+    monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "agent/plan")
+    monkeypatch.setattr(orchestrator, "get_git_status", lambda path, **kwargs: "")
+    monkeypatch.setattr(orchestrator, "get_git_diff", lambda path, **kwargs: "")
+    monkeypatch.setattr(orchestrator, "_create_run_dir", lambda path: run_dir)
+    monkeypatch.setattr(orchestrator, "find_worktree_for_branch", lambda *args: None)
+    monkeypatch.setattr(orchestrator, "branch_exists", lambda *args: True)
+    monkeypatch.setattr(orchestrator, "create_worktree", lambda *args: worktree)
+    monkeypatch.setattr(orchestrator, "_run_phase", lambda *, phase, **kwargs: f"{phase} output")
+    monkeypatch.setattr(orchestrator, "run_verification_commands", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        orchestrator,
+        "remove_worktree",
+        lambda repo_path, worktree_path: removed.append((repo_path, worktree_path)) or "",
+    )
+
+    result = orchestrator.run_orchestrator(
+        repo_path=tmp_path,
+        task="full run",
+        config_path=config_path,
+        use_worktree=True,
+        base_branch="base",
+        agent_branch="agent/plan",
+    )
+
+    assert result.status == "completed"
+    assert removed == [(tmp_path.resolve(), worktree.resolve())]
+    report = result.report_path.read_text(encoding="utf-8")
+    assert "worktree cleanup**: removed" in report
+
+
+def test_reused_worktree_is_not_removed_on_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run_dir = tmp_path / "run"
+    worktree = tmp_path / "existing-worktree"
+    config_path = _write_cleanup_config(tmp_path, delete_on_success=True)
+    run_dir.mkdir()
+    worktree.mkdir()
+    monkeypatch.setattr(orchestrator, "ensure_git_repo", lambda path: True)
+    monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "agent/plan")
+    monkeypatch.setattr(orchestrator, "get_git_status", lambda path, **kwargs: "")
+    monkeypatch.setattr(orchestrator, "get_git_diff", lambda path, **kwargs: "")
+    monkeypatch.setattr(orchestrator, "_create_run_dir", lambda path: run_dir)
+    monkeypatch.setattr(orchestrator, "find_worktree_for_branch", lambda *args: worktree)
+    monkeypatch.setattr(
+        orchestrator,
+        "create_worktree",
+        lambda *args, **kwargs: pytest.fail("Existing worktree must be reused"),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "remove_worktree",
+        lambda *args, **kwargs: pytest.fail("Reused worktree must not be removed"),
+    )
+    monkeypatch.setattr(orchestrator, "_run_phase", lambda *, phase, **kwargs: f"{phase} output")
+    monkeypatch.setattr(orchestrator, "run_verification_commands", lambda *args, **kwargs: {})
+
+    result = orchestrator.run_orchestrator(
+        repo_path=tmp_path,
+        task="full run",
+        config_path=config_path,
+        use_worktree=True,
+        base_branch="base",
+        agent_branch="agent/plan",
+    )
+
+    assert result.status == "completed"
+    report = result.report_path.read_text(encoding="utf-8")
+    assert "worktree cleanup**: skipped (worktree was reused)" in report
+
+
+def test_dirty_created_worktree_is_not_removed_on_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run_dir = tmp_path / "run"
+    worktree = tmp_path / "new-worktree"
+    config_path = _write_cleanup_config(tmp_path, delete_on_success=True)
+    run_dir.mkdir()
+    worktree.mkdir()
+    monkeypatch.setattr(orchestrator, "ensure_git_repo", lambda path: True)
+    monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "agent/plan")
+    monkeypatch.setattr(orchestrator, "get_git_status", lambda path, **kwargs: " M changed.py")
+    monkeypatch.setattr(orchestrator, "get_git_diff", lambda path, **kwargs: "diff")
+    monkeypatch.setattr(orchestrator, "_create_run_dir", lambda path: run_dir)
+    monkeypatch.setattr(orchestrator, "find_worktree_for_branch", lambda *args: None)
+    monkeypatch.setattr(orchestrator, "branch_exists", lambda *args: True)
+    monkeypatch.setattr(orchestrator, "create_worktree", lambda *args: worktree)
+    monkeypatch.setattr(
+        orchestrator,
+        "remove_worktree",
+        lambda *args, **kwargs: pytest.fail("Dirty worktree must not be removed"),
+    )
+    monkeypatch.setattr(orchestrator, "_run_phase", lambda *, phase, **kwargs: f"{phase} output")
+    monkeypatch.setattr(orchestrator, "run_verification_commands", lambda *args, **kwargs: {})
+
+    result = orchestrator.run_orchestrator(
+        repo_path=tmp_path,
+        task="full run",
+        config_path=config_path,
+        use_worktree=True,
+        base_branch="base",
+        agent_branch="agent/plan",
+    )
+
+    assert result.status == "completed"
+    report = result.report_path.read_text(encoding="utf-8")
+    assert "worktree cleanup**: skipped (working tree dirty)" in report
+
+
+def test_created_clean_worktree_is_removed_on_failure_when_configured(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run_dir = tmp_path / "run"
+    worktree = tmp_path / "new-worktree"
+    config_path = _write_cleanup_config(tmp_path, delete_on_failure=True)
+    run_dir.mkdir()
+    worktree.mkdir()
+    removed: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(orchestrator, "ensure_git_repo", lambda path: True)
+    monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "agent/plan")
+    monkeypatch.setattr(orchestrator, "get_git_status", lambda path, **kwargs: "")
+    monkeypatch.setattr(orchestrator, "get_git_diff", lambda path, **kwargs: "")
+    monkeypatch.setattr(orchestrator, "_create_run_dir", lambda path: run_dir)
+    monkeypatch.setattr(orchestrator, "find_worktree_for_branch", lambda *args: None)
+    monkeypatch.setattr(orchestrator, "branch_exists", lambda *args: True)
+    monkeypatch.setattr(orchestrator, "create_worktree", lambda *args: worktree)
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_phase",
+        lambda *, phase, **kwargs: (_ for _ in ()).throw(RuntimeError("agent failed")),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "remove_worktree",
+        lambda repo_path, worktree_path: removed.append((repo_path, worktree_path)) or "",
+    )
+
+    with pytest.raises(RuntimeError, match="agent failed"):
+        orchestrator.run_orchestrator(
+            repo_path=tmp_path,
+            task="full run",
+            config_path=config_path,
+            use_worktree=True,
+            base_branch="base",
+            agent_branch="agent/plan",
+        )
+
+    assert removed == [(tmp_path.resolve(), worktree.resolve())]
+    report = (run_dir / "report.md").read_text(encoding="utf-8")
+    assert "worktree cleanup**: removed" in report
 
 
 def test_write_phase_rejects_protected_branch_before_claude(

@@ -7,7 +7,7 @@ task -> target validation -> optional worktree -> planner -> implementer
      -> verification -> fixer loop -> reviewer -> report
 ```
 
-It is designed to keep orchestration policy outside the target repository. It does not commit, push, delete branches, remove worktrees, or modify protected branches.
+It is designed to keep orchestration policy outside the target repository. It does not commit, push, delete branches, or modify protected branches. Worktree cleanup is opt-in and removes only clean worktrees created by the current run.
 
 ## Architecture
 
@@ -93,6 +93,8 @@ Each run records the resolved per-phase guardrails (agent, backend, read-only fl
 ## Worktree isolation
 
 Set `project.use_worktree` or pass `--use-worktree` to create a new local branch plus linked worktree. The agent branch cannot be `main`, `master`, `develop`, `production`, or `release/*`. Worktree creation fetches only, then uses `git worktree add -b`; it never pushes.
+
+Cleanup is disabled by default. Set `git.delete_worktree_on_success` or `git.delete_worktree_on_failure` to remove clean worktrees created by that run. Reused worktrees are never removed, and dirty worktrees are skipped instead of being force-deleted.
 
 ## In-place agent branch
 
@@ -420,9 +422,16 @@ Manage it with the queue CLI:
 
 ```bash
 python -m agent.queue_cli add tasks/my-task.yaml       # validate + enqueue
+python -m agent.queue_cli add tasks/my-task.yaml --retry-on-review-revise --retry-on-verification-failure
 python -m agent.queue_cli list                         # show queue states
 python -m agent.queue_cli run --workers 2 --max-tasks 10 --max-minutes 120
 ```
+
+Queue metadata can live in the YAML task file, or be stamped only into the
+queued copy with `queue_cli add` flags such as `--retry-on-review-revise`,
+`--max-review-cycles`, `--retry-on-verification-failure`, and `--max-retries`.
+Prefer flags when a target-local task file should also remain usable with
+`agent.main --run-file`, because direct run files reject queue-only fields.
 
 Semantics:
 

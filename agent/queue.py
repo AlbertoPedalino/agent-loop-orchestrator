@@ -9,9 +9,9 @@ The queue is a directory with four state subdirectories::
       failed/    exhausted tasks plus the same sidecar
 
 A task file carries the exact same fields as a ``--run-file`` plus queue-only
-metadata (``priority``, ``max_retries``, ``retry_on_verification_failure``);
-``attempts``, ``not_before``, and ``resume_from`` are managed by the queue
-itself across retries. ``repo_path`` is required: a queued task must be
+metadata (``priority``, retry/review flags, and retry/review limits);
+``attempts``, ``review_cycles``, ``not_before``, and ``resume_from`` are managed by the queue
+itself across retries/revisions. ``repo_path`` is required: a queued task must be
 self-contained because it does not inherit a working directory.
 
 Claiming uses an exclusive ``.claim`` marker (``O_CREAT | O_EXCL``) followed by
@@ -31,7 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 import json
 import os
 import threading
@@ -234,20 +234,34 @@ def _unique_destination(directory: Path, name: str) -> Path:
     return candidate
 
 
-def enqueue(queue_dir: Path, source: Path, *, default_repo_path: Path | None = None) -> Path:
+def enqueue(
+    queue_dir: Path,
+    source: Path,
+    *,
+    default_repo_path: Path | None = None,
+    queue_metadata: Mapping[str, Any] | None = None,
+) -> Path:
     """Validate *source* and copy it into ``queued/`` under a unique name.
 
     A task file kept inside its target repository can omit ``repo_path`` and
     stay location-independent; *default_repo_path* (the CLI passes the launch
     directory) is stamped into the queued copy at enqueue time, so the copy is
-    self-contained and workers can run from anywhere. The source file is never
-    modified.
+    self-contained and workers can run from anywhere. Optional queue metadata
+    is also stamped only into the queued copy. The source file is never modified.
     """
     resolved_source = source.expanduser().resolve()
     data = _load_task_data(resolved_source)
     stamped = False
     if data.get("repo_path") is None and default_repo_path is not None:
         data = {**data, "repo_path": str(default_repo_path.expanduser().resolve())}
+        stamped = True
+    if queue_metadata:
+        unknown = set(queue_metadata) - _QUEUE_ONLY_FIELDS
+        if unknown:
+            raise QueueTaskError(
+                f"Unknown queue metadata fields: {', '.join(sorted(unknown))}"
+            )
+        data = {**data, **dict(queue_metadata)}
         stamped = True
     task = _parse_queue_data(data, resolved_source)
     dirs = queue_state_dirs(queue_dir)

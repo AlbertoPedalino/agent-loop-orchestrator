@@ -102,6 +102,31 @@ def test_enqueue_stamps_default_repo_path(tmp_path: Path) -> None:
     assert "repo_path" not in yaml.safe_load(source.read_text(encoding="utf-8"))
 
 
+def test_enqueue_stamps_queue_metadata_without_modifying_source(tmp_path: Path) -> None:
+    queue_dir = tmp_path / "queue"
+    source = _write_task(tmp_path / "task.yaml")
+
+    destination = enqueue(
+        queue_dir,
+        source,
+        queue_metadata={
+            "retry_on_review_revise": True,
+            "max_review_cycles": 2,
+            "retry_on_verification_failure": True,
+            "max_retries": 3,
+        },
+    )
+
+    task = parse_queue_task(destination)
+    assert task.retry_on_review_revise is True
+    assert task.max_review_cycles == 2
+    assert task.retry_on_verification_failure is True
+    assert task.max_retries == 3
+    source_data = yaml.safe_load(source.read_text(encoding="utf-8"))
+    assert "retry_on_review_revise" not in source_data
+    assert "retry_on_verification_failure" not in source_data
+
+
 def test_enqueue_without_repo_path_or_default_rejects(tmp_path: Path) -> None:
     source = tmp_path / "task.yaml"
     source.write_text(yaml.safe_dump({"task": "x"}), encoding="utf-8")

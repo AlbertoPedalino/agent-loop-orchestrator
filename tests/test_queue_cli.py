@@ -68,6 +68,44 @@ def test_add_stamps_cwd_when_repo_path_missing(
     assert parse_queue_task(queued[0]).run.repo_path == target_repo.resolve()
 
 
+def test_add_stamps_review_retry_metadata_without_modifying_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from agent.queue import parse_queue_task
+
+    queue_dir = tmp_path / "queue"
+    source = _write_task(tmp_path / "my-task.yaml")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "queue_cli",
+            "--queue-dir",
+            str(queue_dir),
+            "add",
+            str(source),
+            "--retry-on-verification-failure",
+            "--max-retries",
+            "3",
+            "--retry-on-review-revise",
+            "--max-review-cycles",
+            "2",
+        ],
+    )
+
+    assert main() == 0
+    assert "Enqueued:" in capsys.readouterr().out
+    queued = list((queue_dir / "queued").glob("*.yaml"))
+    assert len(queued) == 1
+    task = parse_queue_task(queued[0])
+    assert task.retry_on_verification_failure is True
+    assert task.max_retries == 3
+    assert task.retry_on_review_revise is True
+    assert task.max_review_cycles == 2
+    source_data = yaml.safe_load(source.read_text(encoding="utf-8"))
+    assert "retry_on_review_revise" not in source_data
+    assert "retry_on_verification_failure" not in source_data
+
+
 def test_add_rejects_invalid_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     bad = tmp_path / "bad.yaml"
     bad.write_text(yaml.safe_dump({"task": ["not", "a", "string"]}), encoding="utf-8")

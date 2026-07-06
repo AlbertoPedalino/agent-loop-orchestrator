@@ -186,6 +186,29 @@ def create_worktree(
     return worktree_path
 
 
+def remove_worktree(repo_path: Path, worktree_path: Path) -> str:
+    """Remove a registered linked worktree without deleting its branch.
+
+    Removal is intentionally non-forced: Git refuses dirty worktrees, which
+    keeps uncommitted agent output from being deleted by cleanup policy.
+    """
+    resolved_repo_path = repo_path.expanduser().resolve()
+    resolved_worktree_path = worktree_path.expanduser().resolve()
+    if not ensure_git_repo(resolved_repo_path):
+        raise GitOperationError(f"Not a Git repository: {resolved_repo_path}")
+    if resolved_worktree_path == resolved_repo_path:
+        raise ValueError("Refusing to remove the source repository as a worktree")
+
+    result = _run_git(
+        resolved_repo_path,
+        "worktree",
+        "remove",
+        str(resolved_worktree_path),
+        timeout=180,
+    )
+    return _git_output_or_error(result, "worktree removal")
+
+
 @dataclass(frozen=True)
 class InPlaceBranchResult:
     """Outcome of checking out an agent branch inside the target repository."""

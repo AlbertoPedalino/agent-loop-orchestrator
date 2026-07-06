@@ -17,8 +17,8 @@ git:
   allow_dirty: false         # permit switching branches with a dirty work tree
   worktree_root: ../agent-worktrees
   require_clean_repo: false
-  delete_worktree_on_success: false
-  delete_worktree_on_failure: false
+  delete_worktree_on_success: false  # remove clean worktrees created by the run
+  delete_worktree_on_failure: false  # remove clean worktrees created by the run
 
 limits:
   max_fix_attempts: 3
