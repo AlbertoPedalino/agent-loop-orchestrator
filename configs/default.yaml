@@ -30,6 +30,8 @@ limits:
 memory:
   enabled: true                 # inject + update accumulated project knowledge
   file: .agent-loop/memory.md   # path relative to the target repository root
+  history: true                 # record run outcomes and inject recent ones
+  history_file: .agent-loop/history.jsonl
 
 verification:
   timeout_seconds: 120

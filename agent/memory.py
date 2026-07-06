@@ -23,11 +23,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import json
 import re
 
 from agent.log import get_logger
 
 DEFAULT_MEMORY_FILE = ".agent-loop/memory.md"
+DEFAULT_HISTORY_FILE = ".agent-loop/history.jsonl"
+
+# How many recent run outcomes are injected into planner prompts by default.
+DEFAULT_HISTORY_LIMIT = 5
 
 # Soft ceiling echoing the "keep it concise" guidance for agent context files;
 # larger memory still works but is logged as a curation reminder.
@@ -57,13 +62,23 @@ class MemoryConfig:
 
     enabled: bool
     path: Path
+    history_enabled: bool = True
+    history_path: Path | None = None
+
+
+def _resolve_repo_file(value: str, repo_path: Path) -> Path:
+    raw_path = Path(value).expanduser()
+    resolved_repo = repo_path.expanduser().resolve()
+    path = raw_path if raw_path.is_absolute() else resolved_repo / raw_path
+    return path.resolve()
 
 
 def resolve_memory_config(config: dict[str, Any], repo_path: Path) -> MemoryConfig:
     """Resolve the ``memory`` config section against the main repository path.
 
     Defaults to an enabled ``.agent-loop/memory.md`` so the feature works without
-    configuration; set ``memory.enabled: false`` to opt out.
+    configuration; set ``memory.enabled: false`` to opt out. Run history follows
+    the same model with ``memory.history`` and ``memory.history_file``.
     """
     section = config.get("memory", {})
     if section is None:
@@ -76,10 +91,18 @@ def resolve_memory_config(config: dict[str, Any], repo_path: Path) -> MemoryConf
     file_value = section.get("file", DEFAULT_MEMORY_FILE)
     if not isinstance(file_value, str) or not file_value.strip():
         raise ValueError("memory.file must be a non-empty string")
-    raw_path = Path(file_value).expanduser()
-    resolved_repo = repo_path.expanduser().resolve()
-    path = raw_path if raw_path.is_absolute() else resolved_repo / raw_path
-    return MemoryConfig(enabled=enabled, path=path.resolve())
+    history_enabled = section.get("history", True)
+    if not isinstance(history_enabled, bool):
+        raise ValueError("memory.history must be a boolean")
+    history_file_value = section.get("history_file", DEFAULT_HISTORY_FILE)
+    if not isinstance(history_file_value, str) or not history_file_value.strip():
+        raise ValueError("memory.history_file must be a non-empty string")
+    return MemoryConfig(
+        enabled=enabled,
+        path=_resolve_repo_file(file_value, repo_path),
+        history_enabled=history_enabled,
+        history_path=_resolve_repo_file(history_file_value, repo_path),
+    )
 
 
 def load_memory(memory_config: MemoryConfig) -> str:
@@ -122,6 +145,67 @@ def write_memory(memory_config: MemoryConfig, content: str) -> None:
             line_count,
             _SOFT_MAX_LINES,
         )
+
+
+def append_history(memory_config: MemoryConfig, entry: dict[str, Any]) -> bool:
+    """Append one run-outcome entry to the history log. Return whether written.
+
+    History is separate from curated memory: memory holds what the loop knows
+    about the code, history holds how recent runs went (status, fix attempts),
+    so a planner can avoid repeating an approach that just failed.
+    """
+    if not memory_config.history_enabled or memory_config.history_path is None:
+        return False
+    memory_config.history_path.parent.mkdir(parents=True, exist_ok=True)
+    with memory_config.history_path.open("a", encoding="utf-8") as history_file:
+        history_file.write(json.dumps(entry, sort_keys=True) + "\n")
+    return True
+
+
+def load_recent_history(
+    memory_config: MemoryConfig, limit: int = DEFAULT_HISTORY_LIMIT
+) -> list[dict[str, Any]]:
+    """Return up to *limit* most recent history entries (oldest first)."""
+    if (
+        not memory_config.history_enabled
+        or memory_config.history_path is None
+        or not memory_config.history_path.is_file()
+    ):
+        return []
+    entries: list[dict[str, Any]] = []
+    for line in memory_config.history_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            entries.append(parsed)
+    return entries[-limit:]
+
+
+def format_history_section(entries: list[dict[str, Any]]) -> str:
+    """Format recent run outcomes as a prompt section, or ``""`` when empty."""
+    if not entries:
+        return ""
+    lines = [
+        "# Recent Run History",
+        "",
+        "Outcomes of the most recent agent-loop runs on this repository. Use them "
+        "to avoid repeating approaches that already failed.",
+        "",
+    ]
+    for entry in entries:
+        summary = " ".join(str(entry.get("task", "")).split())
+        if len(summary) > 120:
+            summary = summary[:117] + "..."
+        lines.append(
+            f"- [{entry.get('timestamp', '?')}] status={entry.get('status', '?')} "
+            f"fix_attempts={entry.get('fix_attempts', '?')}: {summary}"
+        )
+    return "\n".join(lines)
 
 
 def update_memory_from_output(memory_config: MemoryConfig, output: str) -> bool:

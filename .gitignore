@@ -21,6 +21,7 @@ __pycache__/
 # Orchestrator runtime artifacts
 runs/*
 !runs/.gitkeep
+tasks/queue/
 
 # Local external repos / worktrees
 external/

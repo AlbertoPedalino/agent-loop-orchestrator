@@ -18,6 +18,9 @@ It is designed to keep orchestration policy outside the target repository. It do
 - `agent/hooks.py` provides deterministic pre/post command and phase guardrails.
 - `agent/subagents.py` loads named phase settings from YAML.
 - `agent/git_utils.py` creates local-only worktrees and rejects protected agent branch names.
+- `agent/queue.py` and `agent/queue_cli.py` provide the file-based task queue with parallel workers and retries.
+- `agent/review_gate.py` parses the reviewer's structured verdict block.
+- `agent/memory.py` handles accumulated project memory and the cross-run history log.
 
 ## Agents and backends
 
@@ -182,7 +185,11 @@ Memory is stored in the main repository (not a throwaway worktree) so it persist
 memory:
   enabled: true                 # set false to disable injection and updates
   file: .agent-loop/memory.md   # path relative to the target repository root
+  history: true                 # record run outcomes and inject recent ones
+  history_file: .agent-loop/history.jsonl
 ```
+
+Alongside curated memory, the loop appends one JSON line per run to a history log (timestamp, task summary, status, fix attempts, run directory) and injects the most recent entries into the planner prompt as a "Recent Run History" section, so a new run knows how the last attempts on this repository went and can avoid repeating an approach that just failed.
 
 Memory is **knowledge the loop discovers** and rewrites. It is distinct from `config.yaml`, which is **human-authored policy** (verification commands, blocked commands, branch settings, source whitelists) that the loop enforces but never writes — keep guardrails there, not in memory. A repository-root `CLAUDE.md` is optional and complementary: it is auto-loaded by every interactive `claude` session in the repo (which the loop's prompt injection does not reach), so keep it lean and have it point to `.agent-loop/memory.md`.
 
@@ -384,6 +391,41 @@ task: |
   Improve action tab chip rendering while preserving behavior.
 ```
 
+## Task queue
+
+For batches of tasks, a file-based queue lives under `tasks/queue/` (gitignored) with four state directories: `queued/`, `running/`, `done/`, and `failed/`. A queue task file is a normal run file plus queue metadata, and must set `repo_path` explicitly:
+
+```yaml
+repo_path: ../external/GM-Board
+task: Fix the flaky character-sheet test.
+use_worktree: true
+base_branch: main
+agent_branch: agent/fix-character-sheet
+priority: 5                          # higher runs first (default 0)
+max_retries: 2                       # re-attempts after a crash (default 1)
+retry_on_verification_failure: true  # also retry when verification fails
+```
+
+Manage it with the queue CLI:
+
+```bash
+python -m agent.queue_cli add tasks/my-task.yaml       # validate + enqueue
+python -m agent.queue_cli list                         # show queue states
+python -m agent.queue_cli run --workers 2 --max-tasks 10 --max-minutes 120
+```
+
+Semantics:
+
+- **Claiming** uses an exclusive `.claim` marker (`O_CREAT | O_EXCL`) before moving a task to `running/`, because a bare rename is not a reliable mutex on Windows (`MoveFileExW` renames by handle, so two racing renames can both report success). Multiple workers — threads or separate processes — can safely share one queue.
+- **Parallelism**: with `--workers` above 1, every task must run in an isolated worktree (`use_worktree: true` or `branch_mode: worktree`); tasks without isolation are failed with a validation error instead of letting two agents edit the same working tree.
+- **Retries** re-enqueue a crashed task with an exponential-backoff `not_before` timestamp. When the failed attempt already produced a plan, the retry records `resume_from` and skips the planner phase, reusing `planner_output.md` from the failed run. `retry_on_verification_failure: true` extends this to runs whose verification never passed.
+- **Aggregate limits**: `--max-tasks` bounds how many attempts one `run` invocation claims; `--max-minutes` bounds its wall-clock time — the safety rails for an unattended session.
+- **Results**: each finished task gets a `<name>.result.json` sidecar in `done/` or `failed/` with status, run directory, report path, attempt count, and the reviewer verdict when one was emitted.
+
+## Review verdict
+
+The reviewer phase is asked to end with a fenced ` ```verdict ``` ` block containing `{"verdict": "approve" | "revise" | "reject", "findings": [...]}`. The orchestrator parses it deterministically, saves `review_verdict.json` in the run directory, records the verdict in the report, and exposes it on the run result so automation (like the queue) can branch on the review outcome without re-reading prose. A missing or malformed block degrades to "not provided" and never fails the run.
+
 ## Safety notes
 
 - Do not use this tool to bypass target-repository policy.
@@ -408,5 +450,5 @@ When using the repository virtual environment on Windows:
 
 ## Roadmap
 
-1. Add configurable review gates before verification and branch handoff.
-2. Add optional cleanup policies that require explicit user confirmation.
+1. Add optional cleanup policies that require explicit user confirmation.
+2. Queue-level review-gate policies (e.g. auto-requeue a fixer pass on a `revise` verdict).
