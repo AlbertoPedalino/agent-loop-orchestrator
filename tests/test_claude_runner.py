@@ -10,7 +10,6 @@ from agent.claude_runner import ClaudeRunnerError, _build_claude_command, run_cl
 
 def test_build_command_includes_only_supplied_flags() -> None:
     command = _build_claude_command(
-        "plan",
         allowed_tools=["Read", "Grep"],
         disallowed_tools=None,
         permission_mode=None,
@@ -21,7 +20,6 @@ def test_build_command_includes_only_supplied_flags() -> None:
     assert command == [
         "claude",
         "-p",
-        "plan",
         "--allowedTools",
         "Read,Grep",
         "--max-budget-usd",
@@ -29,9 +27,21 @@ def test_build_command_includes_only_supplied_flags() -> None:
     ]
 
 
+def test_build_command_never_carries_prompt_on_argv() -> None:
+    command = _build_claude_command(
+        allowed_tools=None,
+        disallowed_tools=None,
+        permission_mode=None,
+        output_format=None,
+        max_budget_usd=None,
+    )
+
+    # Prompt is delivered on stdin to avoid the OS command-line length limit.
+    assert command == ["claude", "-p"]
+
+
 def test_build_command_never_passes_max_turns() -> None:
     command = _build_claude_command(
-        "plan",
         allowed_tools=None,
         disallowed_tools=None,
         permission_mode=None,
@@ -44,7 +54,6 @@ def test_build_command_never_passes_max_turns() -> None:
 
 def test_build_command_stream_json_adds_verbose() -> None:
     command = _build_claude_command(
-        "plan",
         allowed_tools=None,
         disallowed_tools=None,
         permission_mode=None,
@@ -83,7 +92,6 @@ def test_captured_prompt_returns_stdout(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert captured["command"] == [
         "claude",
         "-p",
-        "implement",
         "--allowedTools",
         "Edit,Bash",
         "--disallowedTools",
@@ -95,15 +103,12 @@ def test_captured_prompt_returns_stdout(monkeypatch: pytest.MonkeyPatch, tmp_pat
         "--max-budget-usd",
         "2.0",
     ]
-    assert captured["kwargs"] == {
-        "cwd": tmp_path.resolve(),
-        "capture_output": True,
-        "text": True,
-        "encoding": "utf-8",
-        "errors": "replace",
-        "check": False,
-        "timeout": 300,
-    }
+    # Prompt travels on stdin, not argv.
+    assert "implement" not in captured["command"]
+    assert captured["kwargs"]["input"] == "implement"
+    assert captured["kwargs"]["cwd"] == tmp_path.resolve()
+    assert captured["kwargs"]["capture_output"] is True
+    assert captured["kwargs"]["timeout"] == 300
 
 
 class _FakeStream:
@@ -119,8 +124,21 @@ class _FakeStderr:
         return ""
 
 
+class _FakeStdin:
+    def __init__(self) -> None:
+        self.written: list[str] = []
+        self.closed = False
+
+    def write(self, text: str) -> None:
+        self.written.append(text)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class _FakeProcess:
     def __init__(self, lines: list[str], return_code: int = 0) -> None:
+        self.stdin = _FakeStdin()
         self.stdout = _FakeStream(lines)
         self.stderr = _FakeStderr()
         self._return_code = return_code
@@ -143,10 +161,14 @@ def test_streaming_prompt_extracts_result(monkeypatch: pytest.MonkeyPatch, tmp_p
         '"num_turns":3,"total_cost_usd":0.12}\n',
     ]
     captured: dict[str, object] = {}
+    processes: list[_FakeProcess] = []
 
     def fake_popen(command: list[str], **kwargs: object) -> _FakeProcess:
         captured["command"] = command
-        return _FakeProcess(lines)
+        captured["kwargs"] = kwargs
+        process = _FakeProcess(lines)
+        processes.append(process)
+        return process
 
     monkeypatch.setattr("agent.claude_runner.subprocess.Popen", fake_popen)
 
@@ -156,6 +178,11 @@ def test_streaming_prompt_extracts_result(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert "--output-format" in captured["command"]
     assert "stream-json" in captured["command"]
     assert "--verbose" in captured["command"]
+    # Prompt travels on stdin (piped, fed from a writer thread), not argv.
+    assert "inspect" not in captured["command"]
+    assert captured["kwargs"]["stdin"] == subprocess.PIPE
+    assert processes[0].stdin.written == ["inspect"]
+    assert processes[0].stdin.closed
 
 
 def test_streaming_nonzero_return_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -204,5 +231,5 @@ def test_nonzero_result_raises_with_safe_context(monkeypatch: pytest.MonkeyPatch
     message = str(error.value)
     assert "fixer" in message
     assert "return code 7" in message
-    assert "<redacted-prompt>" in message
+    # The prompt is delivered on stdin and never appears in the command/diagnostics.
     assert "private prompt" not in message

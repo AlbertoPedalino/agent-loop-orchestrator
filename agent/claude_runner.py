@@ -28,7 +28,6 @@ def _validate_repo_path(repo_path: Path) -> Path:
 
 
 def _build_claude_command(
-    prompt: str,
     *,
     allowed_tools: list[str] | None,
     disallowed_tools: list[str] | None,
@@ -36,15 +35,18 @@ def _build_claude_command(
     output_format: str | None,
     max_budget_usd: float | None,
 ) -> list[str]:
-    """Build a Claude command without exposing prompt text to a shell.
+    """Build a Claude print-mode command. The prompt is passed via stdin.
 
-    Tool lists are passed as a single comma-separated value (the CLI accepts a
-    comma- or space-separated list). The agent's tool policy is enforced here so
-    read-only phases cannot edit and blocked commands are denied; this is no
-    longer left to prompt convention. ``stream-json`` output additionally
-    requires ``--verbose`` in print mode, so it is added automatically.
+    Keeping the prompt off ``argv`` avoids the Windows command-line length limit
+    (``WinError 206``) for large prompts (e.g. an implementer prompt carrying the
+    full planner output and project memory). Tool lists are passed as a single
+    comma-separated value (the CLI accepts a comma- or space-separated list). The
+    agent's tool policy is enforced here so read-only phases cannot edit and
+    blocked commands are denied; this is no longer left to prompt convention.
+    ``stream-json`` output additionally requires ``--verbose`` in print mode, so
+    it is added automatically.
     """
-    command = ["claude", "-p", prompt]
+    command = ["claude", "-p"]
     if allowed_tools:
         command.extend(["--allowedTools", ",".join(allowed_tools)])
     if disallowed_tools:
@@ -61,11 +63,8 @@ def _build_claude_command(
 
 
 def _safe_command_display(command: list[str]) -> str:
-    """Return a diagnostic command display without leaking the prompt."""
-    displayed = command.copy()
-    prompt_index = displayed.index("-p") + 1
-    displayed[prompt_index] = "<redacted-prompt>"
-    return " ".join(displayed)
+    """Return a diagnostic command display. The prompt is passed via stdin."""
+    return " ".join(command)
 
 
 def _phase_label(phase: str | None) -> str:
@@ -124,13 +123,16 @@ def _handle_stream_line(line: str, phase: str | None, state: dict[str, Any]) -> 
         )
 
 
-def _run_streaming(command: list[str], cwd: Path, timeout_seconds: int, phase: str | None) -> str:
+def _run_streaming(
+    command: list[str], prompt: str, cwd: Path, timeout_seconds: int, phase: str | None
+) -> str:
     """Run Claude with stream-json output, logging events live, return result text."""
     safe_command = _safe_command_display(command)
     try:
         process = subprocess.Popen(
             command,
             cwd=cwd,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -143,6 +145,21 @@ def _run_streaming(command: list[str], cwd: Path, timeout_seconds: int, phase: s
             f"Claude phase '{_phase_label(phase)}' could not start: {error}\n"
             f"Command: {safe_command}"
         ) from error
+
+    def _feed_stdin() -> None:
+        # Feed the prompt from a thread so a prompt larger than the pipe buffer
+        # cannot deadlock against the stdout reader below.
+        try:
+            assert process.stdin is not None
+            process.stdin.write(prompt)
+            process.stdin.close()
+        except OSError:
+            # The process exited before consuming the prompt; the non-zero
+            # return code is reported below.
+            pass
+
+    stdin_writer = threading.Thread(target=_feed_stdin, daemon=True)
+    stdin_writer.start()
 
     timed_out = threading.Event()
 
@@ -161,6 +178,7 @@ def _run_streaming(command: list[str], cwd: Path, timeout_seconds: int, phase: s
         return_code = process.wait()
     finally:
         watchdog.cancel()
+        stdin_writer.join(timeout=5)
 
     if timed_out.is_set():
         raise ClaudeRunnerError(
@@ -193,13 +211,16 @@ def _run_streaming(command: list[str], cwd: Path, timeout_seconds: int, phase: s
     return result
 
 
-def _run_captured(command: list[str], cwd: Path, timeout_seconds: int, phase: str | None) -> str:
+def _run_captured(
+    command: list[str], prompt: str, cwd: Path, timeout_seconds: int, phase: str | None
+) -> str:
     """Run Claude with buffered output (no live logging) and return stdout."""
     safe_command = _safe_command_display(command)
     try:
         result = subprocess.run(
             command,
             cwd=cwd,
+            input=prompt,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -237,11 +258,13 @@ def run_claude_prompt(
 ) -> str:
     """Run ``claude -p`` in *repo_path* and return its result text.
 
-    The command is always executed as an argument list with ``shell=False``.
-    Tool permissions are passed through so the backend enforces the phase's
-    allow/deny policy. When *stream* is true (the default), ``stream-json`` output
-    is parsed live and each tool call and assistant message is logged to the
-    terminal as it happens; otherwise output is buffered until the phase ends.
+    The command is always executed as an argument list with ``shell=False`` and
+    the prompt is delivered on stdin (never on ``argv``), so large prompts do not
+    hit the OS command-line length limit. Tool permissions are passed through so
+    the backend enforces the phase's allow/deny policy. When *stream* is true (the
+    default), ``stream-json`` output is parsed live and each tool call and
+    assistant message is logged to the terminal as it happens; otherwise output is
+    buffered until the phase ends.
     """
     if max_budget_usd is not None and max_budget_usd <= 0:
         raise ValueError("max_budget_usd must be greater than zero when provided")
@@ -250,7 +273,6 @@ def run_claude_prompt(
 
     resolved_repo_path = _validate_repo_path(repo_path)
     command = _build_claude_command(
-        prompt,
         allowed_tools=allowed_tools,
         disallowed_tools=disallowed_tools,
         permission_mode=permission_mode,
@@ -258,4 +280,4 @@ def run_claude_prompt(
         max_budget_usd=max_budget_usd,
     )
     runner = _run_streaming if stream else _run_captured
-    return runner(command, resolved_repo_path, timeout_seconds, phase)
+    return runner(command, prompt, resolved_repo_path, timeout_seconds, phase)
