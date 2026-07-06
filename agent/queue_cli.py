@@ -84,6 +84,7 @@ def main() -> int:
             print(f"Succeeded: {summary.succeeded}")
             print(f"Failed: {summary.failed}")
             print(f"Retried: {summary.retried}")
+            print(f"Revised: {summary.revised}")
             print(f"Stopped: {summary.stopped_reason}")
             return 0 if summary.failed == 0 else 1
         else:

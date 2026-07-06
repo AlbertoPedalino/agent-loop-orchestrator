@@ -46,6 +46,7 @@ from agent.orchestrator import (
     resolve_config_selection,
     run_orchestrator,
 )
+from agent.review_gate import format_findings_for_task, load_verdict
 from agent.run_file import RunFileConfig, parse_run_data, resolve_task_text
 
 logger = get_logger()
@@ -60,12 +61,16 @@ _CLAIM_STALE_SECONDS = 300.0
 _STATE_DIRS = ("queued", "running", "done", "failed")
 
 # Queue-only metadata; everything else in a task file is a run-file field.
-# "last_error" is written by requeue_for_retry and must survive re-parsing.
+# "last_error" is written by requeue helpers and must survive re-parsing.
 _QUEUE_ONLY_FIELDS = frozenset(
     {
         "priority",
         "max_retries",
         "retry_on_verification_failure",
+        "retry_on_review_revise",
+        "max_review_cycles",
+        "review_cycles",
+        "findings_from",
         "attempts",
         "not_before",
         "resume_from",
@@ -88,9 +93,13 @@ class QueueTask:
     priority: int = 0
     max_retries: int = 1
     retry_on_verification_failure: bool = False
+    retry_on_review_revise: bool = False
+    max_review_cycles: int = 1
+    review_cycles: int = 0
     attempts: int = 0
     not_before: datetime | None = None
     resume_from: Path | None = None
+    findings_from: Path | None = None
 
     @property
     def name(self) -> str:
@@ -108,6 +117,7 @@ class QueueSummary:
     succeeded: int = 0
     failed: int = 0
     retried: int = 0
+    revised: int = 0
     stopped_reason: str = "queue empty"
 
     @property
@@ -155,9 +165,14 @@ def parse_queue_task(path: Path) -> QueueTask:
     priority = _require_int(queue_meta, "priority", 0, -1_000_000)
     max_retries = _require_int(queue_meta, "max_retries", 1, 0)
     attempts = _require_int(queue_meta, "attempts", 0, 0)
+    max_review_cycles = _require_int(queue_meta, "max_review_cycles", 1, 0)
+    review_cycles = _require_int(queue_meta, "review_cycles", 0, 0)
     retry_on_verification_failure = queue_meta.get("retry_on_verification_failure", False)
     if not isinstance(retry_on_verification_failure, bool):
         raise QueueTaskError("Queue task 'retry_on_verification_failure' must be a boolean")
+    retry_on_review_revise = queue_meta.get("retry_on_review_revise", False)
+    if not isinstance(retry_on_review_revise, bool):
+        raise QueueTaskError("Queue task 'retry_on_review_revise' must be a boolean")
 
     not_before: datetime | None = None
     not_before_value = queue_meta.get("not_before")
@@ -177,6 +192,9 @@ def parse_queue_task(path: Path) -> QueueTask:
     resume_from_value = queue_meta.get("resume_from")
     if resume_from_value is not None and not isinstance(resume_from_value, str):
         raise QueueTaskError("Queue task 'resume_from' must be a string path")
+    findings_from_value = queue_meta.get("findings_from")
+    if findings_from_value is not None and not isinstance(findings_from_value, str):
+        raise QueueTaskError("Queue task 'findings_from' must be a string path")
 
     return QueueTask(
         path=resolved,
@@ -185,9 +203,13 @@ def parse_queue_task(path: Path) -> QueueTask:
         priority=priority,
         max_retries=max_retries,
         retry_on_verification_failure=retry_on_verification_failure,
+        retry_on_review_revise=retry_on_review_revise,
+        max_review_cycles=max_review_cycles,
+        review_cycles=review_cycles,
         attempts=attempts,
         not_before=not_before,
         resume_from=Path(resume_from_value) if resume_from_value else None,
+        findings_from=Path(findings_from_value) if findings_from_value else None,
     )
 
 
@@ -308,9 +330,13 @@ def claim_next(queue_dir: Path, now: datetime | None = None) -> QueueTask | None
                 priority=task.priority,
                 max_retries=task.max_retries,
                 retry_on_verification_failure=task.retry_on_verification_failure,
+                retry_on_review_revise=task.retry_on_review_revise,
+                max_review_cycles=task.max_review_cycles,
+                review_cycles=task.review_cycles,
                 attempts=task.attempts,
                 not_before=task.not_before,
                 resume_from=task.resume_from,
+                findings_from=task.findings_from,
             )
         finally:
             _release_claim(path)
@@ -388,6 +414,45 @@ def requeue_for_retry(
     return destination
 
 
+def requeue_for_review_revise(queue_dir: Path, task: QueueTask, run_dir: Path) -> Path:
+    """Re-enqueue a task whose reviewer verdict was ``revise``.
+
+    Unlike a crash retry there is no backoff: the run itself succeeded, the
+    reviewer just wants another pass. The rewritten task resumes from the
+    completed run's plan and carries a pointer to its verdict findings, which
+    the executor appends to the task text for the revision pass. Review cycles
+    are counted separately from crash retries.
+    """
+    dirs = queue_state_dirs(queue_dir)
+    updated = dict(task.raw)
+    updated["review_cycles"] = task.review_cycles + 1
+    updated["resume_from"] = str(run_dir)
+    updated["findings_from"] = str(run_dir)
+    updated["last_error"] = f"reviewer requested revisions (run {run_dir})"
+    destination = dirs["queued"] / task.path.name
+    destination.write_text(yaml.safe_dump(updated, sort_keys=False), encoding="utf-8")
+    task.path.unlink()
+    logger.info(
+        "Requeued %s for review revision %d/%d",
+        task.path.name,
+        task.review_cycles + 1,
+        task.max_review_cycles,
+    )
+    return destination
+
+
+def _task_text_with_findings(task: QueueTask) -> str:
+    """Return the task text, extended with reviewer findings on a revision pass."""
+    text = resolve_task_text(task.run)
+    if task.findings_from is None:
+        return text
+    verdict = load_verdict(task.findings_from)
+    if verdict is None:
+        logger.warning("No loadable verdict in %s; running without findings.", task.findings_from)
+        return text
+    return f"{text.rstrip()}\n\n{format_findings_for_task(verdict)}"
+
+
 def execute_task(task: QueueTask, *, stream: bool = True) -> OrchestrationResult:
     """Run one queue task through the orchestrator (the default executor)."""
     assert task.run.repo_path is not None  # guaranteed by parse_queue_task
@@ -397,7 +462,7 @@ def execute_task(task: QueueTask, *, stream: bool = True) -> OrchestrationResult
         resume_from = None
     return run_orchestrator(
         repo_path=task.run.repo_path,
-        task=resolve_task_text(task.run),
+        task=_task_text_with_findings(task),
         config_path=selection.path,
         config_source=selection.source,
         agent=task.run.agent,
@@ -478,7 +543,28 @@ def _handle_outcome(
             state.summary.retried += 1
         return
 
-    outcome = "done" if result.status not in {"verification-failed", "failed"} else "failed"
+    verdict = result.review_verdict.verdict if result.review_verdict is not None else None
+    if (
+        result.status == "completed"
+        and verdict == "revise"
+        and task.retry_on_review_revise
+        and task.review_cycles < task.max_review_cycles
+    ):
+        requeue_for_review_revise(queue_dir, task, result.run_dir)
+        with state.lock:
+            state.summary.revised += 1
+        return
+
+    # A rejected review gates a verification-green run out of done/: landing it
+    # would contradict the reviewer, so a human has to look at failed/.
+    rejected = result.status == "completed" and verdict == "reject"
+    outcome = (
+        "failed"
+        if rejected or result.status in {"verification-failed", "failed"}
+        else "done"
+    )
+    if rejected:
+        payload["error"] = "reviewer rejected the change"
     finish_task(queue_dir, task, outcome, payload)
     with state.lock:
         if outcome == "done":
@@ -609,10 +695,11 @@ def run_queue(
             future.result()
 
     logger.info(
-        "Queue run finished: %d succeeded, %d failed, %d retried (%s)",
+        "Queue run finished: %d succeeded, %d failed, %d retried, %d revised (%s)",
         state.summary.succeeded,
         state.summary.failed,
         state.summary.retried,
+        state.summary.revised,
         state.summary.stopped_reason,
     )
     return state.summary

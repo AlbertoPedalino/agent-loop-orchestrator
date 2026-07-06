@@ -404,6 +404,8 @@ agent_branch: agent/fix-character-sheet
 priority: 5                          # higher runs first (default 0)
 max_retries: 2                       # re-attempts after a crash (default 1)
 retry_on_verification_failure: true  # also retry when verification fails
+retry_on_review_revise: true         # auto-requeue a revision pass on a revise verdict
+max_review_cycles: 1                 # bound on revise-triggered passes (default 1)
 ```
 
 Manage it with the queue CLI:
@@ -421,6 +423,7 @@ Semantics:
 - **Retries** re-enqueue a crashed task with an exponential-backoff `not_before` timestamp. When the failed attempt already produced a plan, the retry records `resume_from` and skips the planner phase, reusing `planner_output.md` from the failed run. `retry_on_verification_failure: true` extends this to runs whose verification never passed.
 - **Aggregate limits**: `--max-tasks` bounds how many attempts one `run` invocation claims; `--max-minutes` bounds its wall-clock time — the safety rails for an unattended session.
 - **Results**: each finished task gets a `<name>.result.json` sidecar in `done/` or `failed/` with status, run directory, report path, attempt count, and the reviewer verdict when one was emitted.
+- **Review gate**: with `retry_on_review_revise: true`, a run that passes verification but receives a `revise` verdict is re-enqueued immediately (no backoff — nothing crashed) for a revision pass: it resumes from the completed run's plan, and the reviewer's findings are appended to the task text as a "Reviewer Findings to Address" section. Cycles are bounded by `max_review_cycles` and counted separately from crash retries. A `reject` verdict moves the task to `failed/` even when verification passed: landing it would contradict the reviewer, so a human decides.
 
 ## Review verdict
 
@@ -451,4 +454,3 @@ When using the repository virtual environment on Windows:
 ## Roadmap
 
 1. Add optional cleanup policies that require explicit user confirmation.
-2. Queue-level review-gate policies (e.g. auto-requeue a fixer pass on a `revise` verdict).

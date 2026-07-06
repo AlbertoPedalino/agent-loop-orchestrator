@@ -11,11 +11,14 @@ prose is still saved in full either way.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 import json
 import re
 
 VALID_VERDICTS = frozenset({"approve", "revise", "reject"})
+
+VERDICT_FILE_NAME = "review_verdict.json"
 
 # A fenced ```verdict ... ``` block. The last one in an output wins, mirroring
 # the memory-block convention, so the reviewer can reason first and conclude
@@ -47,6 +50,45 @@ class ReviewVerdict:
         return json.dumps(
             {"verdict": self.verdict, "findings": self.findings}, sort_keys=True, indent=2
         )
+
+
+def load_verdict(run_dir: Path) -> ReviewVerdict | None:
+    """Load the saved verdict from a run directory, or ``None``.
+
+    Reads the ``review_verdict.json`` the orchestrator writes, applying the
+    same graceful degradation as :func:`extract_verdict`.
+    """
+    verdict_path = run_dir / VERDICT_FILE_NAME
+    if not verdict_path.is_file():
+        return None
+    return extract_verdict(f"```verdict\n{verdict_path.read_text(encoding='utf-8')}\n```")
+
+
+def format_findings_for_task(verdict: ReviewVerdict) -> str:
+    """Format reviewer findings as a task addendum for a revision pass.
+
+    Appended to the task text when a ``revise`` verdict re-enqueues the run, so
+    the implementer works from the concrete findings instead of re-deriving
+    them from prose.
+    """
+    lines = [
+        "## Reviewer Findings to Address",
+        "",
+        "A previous run of this task passed verification, but the reviewer "
+        "requested revisions. Address these findings without regressing the "
+        "existing changes:",
+        "",
+    ]
+    if verdict.findings:
+        for finding in verdict.findings:
+            severity = str(finding.get("severity", "unspecified"))
+            file_name = str(finding.get("file", "unspecified file"))
+            summary = str(finding.get("summary", "no summary provided"))
+            lines.append(f"- [{severity}] {file_name}: {summary}")
+    else:
+        lines.append("- The reviewer requested revisions but listed no findings; ")
+        lines.append("  re-read the previous reviewer output for context.")
+    return "\n".join(lines)
 
 
 def extract_verdict(output: str) -> ReviewVerdict | None:

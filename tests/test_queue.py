@@ -11,6 +11,7 @@ from agent.orchestrator import OrchestrationResult
 from agent.queue import (
     QueueTask,
     QueueTaskError,
+    _task_text_with_findings,
     claim_next,
     enqueue,
     finish_task,
@@ -269,6 +270,103 @@ def test_run_queue_verification_failure_without_retry_flag_fails(tmp_path: Path)
     assert summary.retried == 0
 
 
+def test_run_queue_revise_requeues_fixer_pass(tmp_path: Path) -> None:
+    """A revise verdict re-enqueues one revision pass carrying the findings."""
+    queue_dir = tmp_path / "queue"
+    queued = queue_dir / "queued"
+    queued.mkdir(parents=True)
+    _write_task(queued / "gated.yaml", retry_on_review_revise=True)
+    revise = ReviewVerdict(
+        verdict="revise", findings=[{"severity": "high", "file": "a.py", "summary": "bug"}]
+    )
+    passes: list[QueueTask] = []
+
+    def executor(task: QueueTask) -> OrchestrationResult:
+        passes.append(task)
+        if len(passes) == 1:
+            result = _result(tmp_path, review_verdict=revise)
+            # The orchestrator persists the verdict beside the run artifacts.
+            (result.run_dir / "review_verdict.json").write_text(
+                revise.to_json() + "\n", encoding="utf-8"
+            )
+            (result.run_dir / "planner_output.md").write_text("# Plan\nsteps", encoding="utf-8")
+            return result
+        return _result(tmp_path, review_verdict=ReviewVerdict(verdict="approve"))
+
+    summary = run_queue(queue_dir, executor=executor, poll_seconds=0.01)
+
+    assert summary.succeeded == 1
+    assert summary.revised == 1
+    assert summary.failed == 0
+    # The revision pass resumes from the completed run and sees its findings.
+    first_run_dir = tmp_path / "runs" / "completed"
+    assert passes[1].review_cycles == 1
+    assert passes[1].resume_from == first_run_dir
+    assert passes[1].findings_from == first_run_dir
+
+
+def test_run_queue_revise_cycles_are_bounded(tmp_path: Path) -> None:
+    queue_dir = tmp_path / "queue"
+    queued = queue_dir / "queued"
+    queued.mkdir(parents=True)
+    _write_task(queued / "loopy.yaml", retry_on_review_revise=True, max_review_cycles=2)
+    revise = ReviewVerdict(verdict="revise", findings=[])
+    passes: list[int] = []
+
+    def always_revise(task: QueueTask) -> OrchestrationResult:
+        passes.append(task.review_cycles)
+        return _result(tmp_path, review_verdict=revise)
+
+    summary = run_queue(queue_dir, executor=always_revise, poll_seconds=0.01)
+
+    # Initial pass + two bounded revision cycles, then it lands in done/
+    # with the verdict recorded instead of looping forever.
+    assert passes == [0, 1, 2]
+    assert summary.revised == 2
+    assert summary.succeeded == 1
+
+
+def test_run_queue_revise_without_opt_in_completes(tmp_path: Path) -> None:
+    queue_dir = tmp_path / "queue"
+    queued = queue_dir / "queued"
+    queued.mkdir(parents=True)
+    _write_task(queued / "plain.yaml")
+
+    summary = run_queue(
+        queue_dir,
+        executor=lambda task: _result(
+            tmp_path, review_verdict=ReviewVerdict(verdict="revise", findings=[])
+        ),
+        poll_seconds=0.01,
+    )
+
+    assert summary.succeeded == 1
+    assert summary.revised == 0
+
+
+def test_run_queue_reject_moves_to_failed(tmp_path: Path) -> None:
+    queue_dir = tmp_path / "queue"
+    queued = queue_dir / "queued"
+    queued.mkdir(parents=True)
+    _write_task(queued / "rejected.yaml")
+
+    summary = run_queue(
+        queue_dir,
+        executor=lambda task: _result(
+            tmp_path, review_verdict=ReviewVerdict(verdict="reject", findings=[])
+        ),
+        poll_seconds=0.01,
+    )
+
+    assert summary.failed == 1
+    assert summary.succeeded == 0
+    sidecar = json.loads(
+        (queue_dir / "failed" / "rejected.result.json").read_text(encoding="utf-8")
+    )
+    assert sidecar["review_verdict"] == "reject"
+    assert "rejected" in sidecar["error"]
+
+
 def test_run_queue_records_review_verdict(tmp_path: Path) -> None:
     queue_dir = tmp_path / "queue"
     queued = queue_dir / "queued"
@@ -365,6 +463,27 @@ def test_parallel_workers_never_claim_a_task_twice(tmp_path: Path) -> None:
     assert summary.succeeded == task_count
     assert summary.failed == 0
     assert sorted(seen) == sorted(f"task-{index:02d}.yaml" for index in range(task_count))
+
+
+def test_task_text_includes_findings_on_revision_pass(tmp_path: Path) -> None:
+    findings_dir = tmp_path / "runs" / "prev"
+    findings_dir.mkdir(parents=True)
+    verdict = ReviewVerdict(
+        verdict="revise", findings=[{"severity": "high", "file": "a.py", "summary": "bug"}]
+    )
+    (findings_dir / "review_verdict.json").write_text(verdict.to_json() + "\n", encoding="utf-8")
+    task_file = _write_task(tmp_path / "task.yaml", findings_from=str(findings_dir))
+
+    text = _task_text_with_findings(parse_queue_task(task_file))
+
+    assert text.startswith("do the thing")
+    assert "Reviewer Findings to Address" in text
+    assert "- [high] a.py: bug" in text
+
+
+def test_task_text_unchanged_without_findings(tmp_path: Path) -> None:
+    task = parse_queue_task(_write_task(tmp_path / "task.yaml"))
+    assert _task_text_with_findings(task) == "do the thing"
 
 
 def test_run_queue_honours_max_tasks(tmp_path: Path) -> None:

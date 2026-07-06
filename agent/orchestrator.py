@@ -43,7 +43,12 @@ from agent.memory import (
 )
 from agent.permissions import resolve_phase_permissions
 from agent.report import write_report
-from agent.review_gate import VERDICT_INSTRUCTION, ReviewVerdict, extract_verdict
+from agent.review_gate import (
+    VERDICT_FILE_NAME,
+    VERDICT_INSTRUCTION,
+    ReviewVerdict,
+    extract_verdict,
+)
 from agent.subagents import SubagentConfig, load_subagents_config
 from agent.verifier import run_verification_commands, verification_passed
 
@@ -968,7 +973,7 @@ def run_orchestrator(
             _write_markdown(run_dir / "reviewer_output.md", reviewer_output)
             review_verdict = extract_verdict(reviewer_output)
             if review_verdict is not None:
-                (run_dir / "review_verdict.json").write_text(
+                (run_dir / VERDICT_FILE_NAME).write_text(
                     review_verdict.to_json() + "\n", encoding="utf-8"
                 )
                 details["review verdict"] = review_verdict.verdict
