@@ -118,6 +118,18 @@ def test_default_backend_is_cli(tmp_path: Path) -> None:
     assert load_run_file(run_file).backend == "cli"
 
 
+def test_api_backend_is_loaded(tmp_path: Path) -> None:
+    run_file = _write_run_file(
+        tmp_path / "run.yaml",
+        """
+        repo_path: .
+        task: do work
+        backend: api
+        """,
+    )
+    assert load_run_file(run_file).backend == "api"
+
+
 def test_default_agent_is_claude(tmp_path: Path) -> None:
     run_file = _write_run_file(
         tmp_path / "run.yaml",

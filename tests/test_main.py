@@ -49,6 +49,12 @@ def test_parser_rejects_sdk_backend() -> None:
         build_parser().parse_args(["--repo-path", ".", "--task", "task", "--backend", "sdk"])
 
 
+def test_parser_accepts_api_backend() -> None:
+    args = build_parser().parse_args(["--repo-path", ".", "--task", "task", "--backend", "api"])
+
+    assert args.backend == "api"
+
+
 def test_parser_rejects_both_task_and_mode_conflicts() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["--repo-path", ".", "--task", "a", "--task-file", "b"])

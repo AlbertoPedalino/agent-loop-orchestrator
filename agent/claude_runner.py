@@ -8,6 +8,7 @@ import json
 import subprocess
 import threading
 
+from agent.api_keys import subprocess_env
 from agent.log import get_logger, summarize_tool_use
 
 
@@ -129,7 +130,12 @@ def _handle_stream_line(line: str, phase: str | None, state: dict[str, Any]) -> 
 
 
 def _run_streaming(
-    command: list[str], prompt: str, cwd: Path, timeout_seconds: int, phase: str | None
+    command: list[str],
+    prompt: str,
+    cwd: Path,
+    timeout_seconds: int,
+    phase: str | None,
+    env: dict[str, str] | None = None,
 ) -> str:
     """Run Claude with stream-json output, logging events live, return result text."""
     safe_command = _safe_command_display(command)
@@ -137,6 +143,7 @@ def _run_streaming(
         process = subprocess.Popen(
             command,
             cwd=cwd,
+            env=env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -217,7 +224,12 @@ def _run_streaming(
 
 
 def _run_captured(
-    command: list[str], prompt: str, cwd: Path, timeout_seconds: int, phase: str | None
+    command: list[str],
+    prompt: str,
+    cwd: Path,
+    timeout_seconds: int,
+    phase: str | None,
+    env: dict[str, str] | None = None,
 ) -> str:
     """Run Claude with buffered output (no live logging) and return stdout."""
     safe_command = _safe_command_display(command)
@@ -225,6 +237,7 @@ def _run_captured(
         result = subprocess.run(
             command,
             cwd=cwd,
+            env=env,
             input=prompt,
             capture_output=True,
             text=True,
@@ -261,6 +274,7 @@ def run_claude_prompt(
     stream: bool = True,
     phase: str | None = None,
     append_system_prompt: str | None = None,
+    backend: str = "cli",
 ) -> str:
     """Run ``claude -p`` in *repo_path* and return its result text.
 
@@ -271,6 +285,11 @@ def run_claude_prompt(
     default), ``stream-json`` output is parsed live and each tool call and
     assistant message is logged to the terminal as it happens; otherwise output is
     buffered until the phase ends.
+
+    *backend* selects how the CLI authenticates: ``cli`` (subscription login;
+    API-key variables are stripped from the subprocess environment) or ``api``
+    (an ``ANTHROPIC_API_KEY`` resolved from the environment or the orchestrator
+    ``.env`` is injected, so the run bills the API account).
     """
     if max_budget_usd is not None and max_budget_usd <= 0:
         raise ValueError("max_budget_usd must be greater than zero when provided")
@@ -286,5 +305,6 @@ def run_claude_prompt(
         max_budget_usd=max_budget_usd,
         append_system_prompt=append_system_prompt,
     )
+    env = subprocess_env("claude", backend)
     runner = _run_streaming if stream else _run_captured
-    return runner(command, prompt, resolved_repo_path, timeout_seconds, phase)
+    return runner(command, prompt, resolved_repo_path, timeout_seconds, phase, env)

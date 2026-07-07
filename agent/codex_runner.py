@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import threading
 
+from agent.api_keys import subprocess_env
 from agent.log import get_logger
 from agent.permissions import is_read_only_tool_set
 
@@ -236,6 +237,7 @@ def _run_streaming(
     output_path: Path,
     timeout_seconds: int,
     phase: str | None,
+    env: dict[str, str] | None = None,
 ) -> str:
     safe_command = _safe_command_display(command)
     prompt_path = output_path.with_name("prompt.md")
@@ -258,6 +260,7 @@ def _run_streaming(
             process = subprocess.Popen(
                 command,
                 cwd=cwd,
+                env=env,
                 stdin=prompt_file,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -329,12 +332,14 @@ def _run_captured(
     output_path: Path,
     timeout_seconds: int,
     phase: str | None,
+    env: dict[str, str] | None = None,
 ) -> str:
     safe_command = _safe_command_display(command)
     try:
         result = subprocess.run(
             command,
             cwd=cwd,
+            env=env,
             input=prompt,
             capture_output=True,
             text=True,
@@ -373,11 +378,17 @@ def run_codex_prompt(
     stream: bool = True,
     phase: str | None = None,
     transient_retries: int = DEFAULT_TRANSIENT_RETRIES,
+    backend: str = "cli",
 ) -> str:
     """Run ``codex exec`` in *repo_path* and return its final message.
 
     A transient failure (a flaky OS sandbox spawn, not a prompt or code error) is
     retried up to ``transient_retries`` times before propagating.
+
+    *backend* selects how the CLI authenticates: ``cli`` (subscription login;
+    API-key variables are stripped from the subprocess environment) or ``api``
+    (an ``OPENAI_API_KEY``/``CODEX_API_KEY`` resolved from the environment or
+    the orchestrator ``.env`` is injected, so the run bills the API account).
     """
     if max_budget_usd is not None:
         raise ValueError("max_budget_usd is supported by Claude CLI, not by Codex CLI")
@@ -404,6 +415,7 @@ def run_codex_prompt(
             stream=stream,
             cli_prefix=_resolve_codex_command_prefix(),
         )
+        env = subprocess_env("codex", backend)
         runner = _run_streaming if stream else _run_captured
         for attempt in range(transient_retries + 1):
             try:
@@ -414,6 +426,7 @@ def run_codex_prompt(
                     output_path,
                     timeout_seconds,
                     phase,
+                    env,
                 )
             except CodexTransientError:
                 if attempt >= transient_retries:

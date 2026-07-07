@@ -95,7 +95,7 @@ def _parse_subagent_entry(name: str, entry: dict[str, Any]) -> SubagentConfig:
         raise ValueError(f"Subagent '{name}' agent must be 'claude' or 'codex'")
     backend = entry.get("backend")
     if backend is not None and backend not in VALID_BACKENDS:
-        raise ValueError(f"Subagent '{name}' backend must be 'cli'")
+        raise ValueError(f"Subagent '{name}' backend must be 'cli' or 'api'")
     permission_mode = entry.get("permission_mode")
     if permission_mode is not None and permission_mode not in VALID_PERMISSION_MODES:
         raise ValueError(

@@ -17,7 +17,7 @@ import argparse
 from pathlib import Path
 
 from agent.log import configure_logging
-from agent.queue import DEFAULT_QUEUE_DIR, enqueue, list_queue, run_queue
+from agent.queue import DEFAULT_QUEUE_DIR, enqueue, list_queue_details, run_queue
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,6 +37,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_parser = subcommands.add_parser("add", help="Validate and enqueue a task file.")
     add_parser.add_argument("task_file", type=Path, help="Queue task YAML file to enqueue.")
+    add_parser.add_argument(
+        "--id",
+        dest="task_id",
+        help="Stable queue task id used by other queued tasks' dependencies.",
+    )
+    add_parser.add_argument(
+        "--depends-on",
+        action="append",
+        default=None,
+        metavar="ID",
+        help="Queue task id that must finish in done/ before this task can run; repeatable.",
+    )
     add_parser.add_argument(
         "--max-retries",
         type=int,
@@ -103,6 +115,8 @@ def main() -> int:
                     ),
                     "retry_on_review_revise": True if args.retry_on_review_revise else None,
                     "max_review_cycles": args.max_review_cycles,
+                    "id": args.task_id,
+                    "depends_on": args.depends_on,
                 }.items()
                 if value is not None
             }
@@ -128,10 +142,10 @@ def main() -> int:
             print(f"Stopped: {summary.stopped_reason}")
             return 0 if summary.failed == 0 else 1
         else:
-            for state, names in list_queue(args.queue_dir).items():
-                print(f"{state} ({len(names)}):")
-                for name in names:
-                    print(f"  {name}")
+            for state, entries in list_queue_details(args.queue_dir).items():
+                print(f"{state} ({len(entries)}):")
+                for entry in entries:
+                    print(f"  {entry}")
     except (FileNotFoundError, NotADirectoryError, ValueError) as error:
         parser.error(str(error))
     return 0

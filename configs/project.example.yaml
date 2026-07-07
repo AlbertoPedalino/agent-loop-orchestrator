@@ -7,13 +7,16 @@ agent:
   provider: claude        # claude | codex
 
 backend:
-  type: cli               # local CLI only; no API/SDK backend
+  type: cli               # cli = subscription-authenticated CLI
+                          # api = same local CLI billed via API key
+                          #       (ANTHROPIC_API_KEY / OPENAI_API_KEY from the
+                          #       environment or the orchestrator .env)
 
 limits:
   max_fix_attempts: 2
   max_changed_files: 5
   phase_timeout_seconds: 600
-  # max_budget_usd is intentionally unsupported in subscription CLI mode.
+  # max_budget_usd is supported only with backend: api and agent: claude.
 
 verification:
   commands:

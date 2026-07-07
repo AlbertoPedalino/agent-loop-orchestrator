@@ -62,6 +62,24 @@ def test_subscription_cli_mode_rejects_max_budget(
         )
 
 
+def test_codex_api_mode_rejects_max_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "agent:\n  provider: codex\nbackend:\n  type: api\nlimits:\n  max_budget_usd: 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(orchestrator, "ensure_git_repo", lambda path: True)
+
+    with pytest.raises(ValueError, match="agent 'claude'"):
+        orchestrator.run_orchestrator(
+            repo_path=tmp_path,
+            task="test task",
+            config_path=config_path,
+        )
+
+
 def test_dry_run_does_not_call_claude_or_verification(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -716,3 +734,61 @@ def test_codex_phase_dispatches_to_codex_runner(
     assert output == "codex plan"
     assert captured["allowed_tools"] == ["Read", "Grep", "Glob"]
     assert captured["disallowed_tools"] == ["Bash(git push:*)"]
+
+
+def test_api_claude_phase_receives_max_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    subagent = SubagentConfig(
+        "planner", "plan", ["Read", "Grep", "Glob"], 1, PROJECT_ROOT / "prompts" / "planner.md"
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "main")
+    monkeypatch.setattr(
+        orchestrator,
+        "run_claude_prompt",
+        lambda prompt, repo_path, **kwargs: captured.update(kwargs) or "safe plan",
+    )
+
+    output = orchestrator._run_phase(
+        phase="planner",
+        prompt="plan",
+        task="task",
+        repo_path=tmp_path,
+        agent="claude",
+        backend="api",
+        subagent=subagent,
+        max_budget_usd=1.25,
+        blocked_commands=["git push"],
+    )
+
+    assert output == "safe plan"
+    assert captured["backend"] == "api"
+    assert captured["max_budget_usd"] == 1.25
+
+
+def test_codex_phase_rejects_max_budget_before_runner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    subagent = SubagentConfig(
+        "planner", "plan", ["Read", "Grep", "Glob"], 1, PROJECT_ROOT / "prompts" / "planner.md"
+    )
+    monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "main")
+    monkeypatch.setattr(
+        orchestrator,
+        "run_codex_prompt",
+        lambda *args, **kwargs: pytest.fail("Codex runner must not receive max_budget_usd"),
+    )
+
+    with pytest.raises(ValueError, match="Claude phases"):
+        orchestrator._run_phase(
+            phase="planner",
+            prompt="plan",
+            task="task",
+            repo_path=tmp_path,
+            agent="codex",
+            backend="api",
+            subagent=subagent,
+            max_budget_usd=1.25,
+            blocked_commands=["git push"],
+        )

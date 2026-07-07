@@ -33,7 +33,10 @@ repo_path: ../external/GM-Board   # optional; omit to use the launch cwd
                                   # orchestrator's configs/default.yaml
 
 agent: claude                     # claude | codex          (default: claude)
-backend: cli                      # local CLI only          (default: cli)
+backend: cli                      # cli | api               (default: cli)
+                                  # cli = subscription-authenticated local CLI
+                                  # api = same CLI with API key injected from
+                                  #       env or orchestrator .env
 
 # --- Branch placement -------------------------------------------------------
 # Three ways to place the run, from most to least isolated:
@@ -71,12 +74,14 @@ dry_run: false                    # true = write run metadata only; never calls
                                   # an agent or runs verification
 
 # --- Queue metadata (NOT valid here) ----------------------------------------
-# priority, max_retries, retry_on_verification_failure, retry_on_review_revise,
-# and max_review_cycles are QUEUE-ONLY fields: agent.main --run-file rejects
-# them. To keep this file usable both directly and in the queue, stamp them at
-# enqueue time instead:
+# id, depends_on, priority, max_retries, retry_on_verification_failure,
+# retry_on_review_revise, and max_review_cycles are QUEUE-ONLY fields:
+# agent.main --run-file rejects them. To keep this file usable both directly
+# and in the queue, stamp them at enqueue time instead:
 #
 #   python -m agent.queue_cli add .agent-loop/tasks/<task>.yaml \
+#     --id sync-combat-sheet-hp \
+#     --depends-on import-character-projection \
 #     --max-retries 2 --retry-on-review-revise --max-review-cycles 1
 
 # --- Task -------------------------------------------------------------------

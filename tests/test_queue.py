@@ -16,6 +16,7 @@ from agent.queue import (
     enqueue,
     finish_task,
     list_queue,
+    list_queue_details,
     parse_queue_task,
     requeue_for_retry,
     run_queue,
@@ -67,12 +68,31 @@ def test_parse_validates_queue_metadata(tmp_path: Path) -> None:
 def test_parse_defaults(tmp_path: Path) -> None:
     task = parse_queue_task(_write_task(tmp_path / "task.yaml"))
 
+    assert task.task_id is None
+    assert task.depends_on == ()
     assert task.priority == 0
     assert task.max_retries == 1
     assert task.attempts == 0
     assert not task.retry_on_verification_failure
     assert task.not_before is None
     assert task.resume_from is None
+
+
+def test_parse_validates_dependency_metadata(tmp_path: Path) -> None:
+    task = parse_queue_task(
+        _write_task(tmp_path / "task.yaml", id="child", depends_on=["parent"])
+    )
+    assert task.task_id == "child"
+    assert task.depends_on == ("parent",)
+
+    with pytest.raises(QueueTaskError, match="depends_on"):
+        parse_queue_task(_write_task(tmp_path / "missing-id.yaml", depends_on=["parent"]))
+    with pytest.raises(QueueTaskError, match="own id"):
+        parse_queue_task(_write_task(tmp_path / "self.yaml", id="self", depends_on=["self"]))
+    with pytest.raises(QueueTaskError, match="duplicate"):
+        parse_queue_task(
+            _write_task(tmp_path / "dup-dep.yaml", id="child", depends_on=["a", "a"])
+        )
 
 
 def test_enqueue_validates_and_copies(tmp_path: Path) -> None:
@@ -114,10 +134,14 @@ def test_enqueue_stamps_queue_metadata_without_modifying_source(tmp_path: Path) 
             "max_review_cycles": 2,
             "retry_on_verification_failure": True,
             "max_retries": 3,
+            "id": "child",
+            "depends_on": ["parent"],
         },
     )
 
     task = parse_queue_task(destination)
+    assert task.task_id == "child"
+    assert task.depends_on == ("parent",)
     assert task.retry_on_review_revise is True
     assert task.max_review_cycles == 2
     assert task.retry_on_verification_failure is True
@@ -125,6 +149,7 @@ def test_enqueue_stamps_queue_metadata_without_modifying_source(tmp_path: Path) 
     source_data = yaml.safe_load(source.read_text(encoding="utf-8"))
     assert "retry_on_review_revise" not in source_data
     assert "retry_on_verification_failure" not in source_data
+    assert "depends_on" not in source_data
 
 
 def test_enqueue_without_repo_path_or_default_rejects(tmp_path: Path) -> None:
@@ -170,6 +195,92 @@ def test_claim_skips_deferred_tasks(tmp_path: Path) -> None:
     assert list_queue(queue_dir)["queued"] == ["deferred.yaml"]
 
 
+def test_claim_waits_for_missing_dependency(tmp_path: Path) -> None:
+    queue_dir = tmp_path / "queue"
+    queued = queue_dir / "queued"
+    queued.mkdir(parents=True)
+    _write_task(queued / "child.yaml", id="child", depends_on=["parent"])
+
+    assert claim_next(queue_dir) is None
+    assert list_queue(queue_dir)["queued"] == ["child.yaml"]
+    assert "waiting: missing parent" in list_queue_details(queue_dir)["queued"][0]
+
+
+def test_claim_runs_parent_before_higher_priority_child(tmp_path: Path) -> None:
+    queue_dir = tmp_path / "queue"
+    queued = queue_dir / "queued"
+    queued.mkdir(parents=True)
+    _write_task(queued / "child.yaml", priority=10, id="child", depends_on=["parent"])
+    _write_task(queued / "parent.yaml", priority=0, id="parent")
+
+    parent = claim_next(queue_dir)
+    assert parent is not None and parent.name == "parent.yaml"
+    finish_task(queue_dir, parent, "done", {"status": "completed"})
+
+    child = claim_next(queue_dir)
+    assert child is not None and child.name == "child.yaml"
+
+
+def test_claim_fails_task_when_dependency_failed(tmp_path: Path) -> None:
+    queue_dir = tmp_path / "queue"
+    queued = queue_dir / "queued"
+    queued.mkdir(parents=True)
+    _write_task(queued / "parent.yaml", id="parent")
+    _write_task(queued / "child.yaml", id="child", depends_on=["parent"])
+
+    parent = claim_next(queue_dir)
+    assert parent is not None and parent.name == "parent.yaml"
+    finish_task(queue_dir, parent, "failed", {"status": "failed", "error": "boom"})
+
+    assert claim_next(queue_dir) is None
+    states = list_queue(queue_dir)
+    assert states["queued"] == []
+    assert states["failed"] == ["child.yaml", "parent.yaml"]
+    sidecar = json.loads(
+        (queue_dir / "failed" / "child.result.json").read_text(encoding="utf-8")
+    )
+    assert sidecar["status"] == "dependency-failed"
+    assert sidecar["id"] == "child"
+    assert sidecar["depends_on"] == ["parent"]
+    assert "parent" in sidecar["dependency_error"]
+
+
+def test_claim_fails_duplicate_queue_ids(tmp_path: Path) -> None:
+    queue_dir = tmp_path / "queue"
+    queued = queue_dir / "queued"
+    queued.mkdir(parents=True)
+    _write_task(queued / "one.yaml", id="same")
+    _write_task(queued / "two.yaml", id="same")
+
+    assert claim_next(queue_dir) is None
+    assert list_queue(queue_dir)["queued"] == []
+    assert list_queue(queue_dir)["failed"] == ["one.yaml", "two.yaml"]
+    for name in ("one", "two"):
+        sidecar = json.loads(
+            (queue_dir / "failed" / f"{name}.result.json").read_text(encoding="utf-8")
+        )
+        assert sidecar["status"] == "dependency-failed"
+        assert "duplicate queue id" in sidecar["dependency_error"]
+
+
+def test_claim_fails_dependency_cycles(tmp_path: Path) -> None:
+    queue_dir = tmp_path / "queue"
+    queued = queue_dir / "queued"
+    queued.mkdir(parents=True)
+    _write_task(queued / "a.yaml", id="a", depends_on=["b"])
+    _write_task(queued / "b.yaml", id="b", depends_on=["a"])
+
+    assert claim_next(queue_dir) is None
+    assert list_queue(queue_dir)["queued"] == []
+    assert list_queue(queue_dir)["failed"] == ["a.yaml", "b.yaml"]
+    for name in ("a", "b"):
+        sidecar = json.loads(
+            (queue_dir / "failed" / f"{name}.result.json").read_text(encoding="utf-8")
+        )
+        assert sidecar["status"] == "dependency-failed"
+        assert "dependency cycle" in sidecar["dependency_error"]
+
+
 def test_claim_moves_invalid_task_to_failed(tmp_path: Path) -> None:
     queue_dir = tmp_path / "queue"
     queued = queue_dir / "queued"
@@ -190,7 +301,11 @@ def test_finish_task_writes_sidecar(tmp_path: Path) -> None:
     queue_dir = tmp_path / "queue"
     queued = queue_dir / "queued"
     queued.mkdir(parents=True)
-    _write_task(queued / "task.yaml")
+    _write_task(queued / "parent.yaml", id="parent")
+    _write_task(queued / "task.yaml", id="child", depends_on=["parent"])
+    parent = claim_next(queue_dir)
+    assert parent is not None and parent.name == "parent.yaml"
+    finish_task(queue_dir, parent, "done", {"status": "completed"})
     task = claim_next(queue_dir)
     assert task is not None
 
@@ -200,6 +315,8 @@ def test_finish_task_writes_sidecar(tmp_path: Path) -> None:
     sidecar = json.loads(destination.with_suffix(".result.json").read_text(encoding="utf-8"))
     assert sidecar["status"] == "completed"
     assert sidecar["attempts"] == 1
+    assert sidecar["id"] == "child"
+    assert sidecar["depends_on"] == ["parent"]
 
 
 def test_requeue_records_backoff_and_resume(tmp_path: Path) -> None:
@@ -238,6 +355,19 @@ def test_run_queue_processes_all_tasks(tmp_path: Path) -> None:
     assert summary.succeeded == 2
     assert summary.failed == 0
     assert len(list_queue(queue_dir)["done"]) == 2
+
+
+def test_run_queue_stops_when_only_missing_dependencies_remain(tmp_path: Path) -> None:
+    queue_dir = tmp_path / "queue"
+    queued = queue_dir / "queued"
+    queued.mkdir(parents=True)
+    _write_task(queued / "child.yaml", id="child", depends_on=["missing"])
+
+    summary = run_queue(queue_dir, executor=lambda task: _result(tmp_path), poll_seconds=0.01)
+
+    assert summary.processed == 0
+    assert summary.stopped_reason == "blocked dependencies"
+    assert list_queue(queue_dir)["queued"] == ["child.yaml"]
 
 
 def test_run_queue_retries_crash_then_succeeds(tmp_path: Path) -> None:

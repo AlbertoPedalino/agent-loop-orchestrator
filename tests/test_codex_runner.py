@@ -184,6 +184,54 @@ def test_captured_prompt_returns_output_last_message(
     assert "implement" not in captured["command"]
 
 
+def test_cli_backend_strips_codex_api_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["kwargs"] = kwargs
+        output_path = Path(command[command.index("--output-last-message") + 1])
+        output_path.write_text("ok", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setenv("OPENAI_API_KEY", "secret")
+    monkeypatch.setenv("CODEX_API_KEY", "secret")
+    monkeypatch.setattr("agent.codex_runner.subprocess.run", fake_run)
+    monkeypatch.setattr("agent.codex_runner._resolve_codex_command_prefix", lambda: ["codex.cmd"])
+
+    assert run_codex_prompt("plan", tmp_path, stream=False) == "ok"
+
+    env = captured["kwargs"]["env"]
+    assert isinstance(env, dict)
+    assert "OPENAI_API_KEY" not in env
+    assert "CODEX_API_KEY" not in env
+
+
+def test_api_backend_injects_codex_api_key_alias(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["kwargs"] = kwargs
+        output_path = Path(command[command.index("--output-last-message") + 1])
+        output_path.write_text("ok", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("CODEX_API_KEY", "codex-key")
+    monkeypatch.setattr("agent.codex_runner.subprocess.run", fake_run)
+    monkeypatch.setattr("agent.codex_runner._resolve_codex_command_prefix", lambda: ["codex.cmd"])
+
+    assert run_codex_prompt("plan", tmp_path, stream=False, backend="api") == "ok"
+
+    env = captured["kwargs"]["env"]
+    assert isinstance(env, dict)
+    assert env["OPENAI_API_KEY"] == "codex-key"
+    assert env["CODEX_API_KEY"] == "codex-key"
+
+
 def test_streaming_prompt_reads_stdin_file_and_streams_stdout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
