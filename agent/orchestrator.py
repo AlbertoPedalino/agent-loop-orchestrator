@@ -30,7 +30,13 @@ from agent.git_utils import (
     remote_branch_exists,
     remove_worktree,
 )
-from agent.hooks import post_phase_hook, pre_phase_hook
+from agent.hooks import (
+    HooksConfig,
+    load_hooks_config,
+    post_phase_hook,
+    pre_phase_hook,
+    run_custom_hooks,
+)
 from agent.memory import (
     MEMORY_UPDATE_INSTRUCTION,
     MemoryConfig,
@@ -296,6 +302,7 @@ def _run_phase(
     timeout_seconds: int = 600,
     stream: bool = True,
     run_dir: Path | None = None,
+    hooks_config: HooksConfig | None = None,
 ) -> str:
     """Dispatch a configured phase through the selected agent/backend.
 
@@ -346,58 +353,97 @@ def _run_phase(
         ",".join(str(skill) for skill in subagent.skills) or "none",
     )
     started_at = time.monotonic()
-    if selected_agent == "claude" and selected_backend == "cli":
-        output = run_claude_prompt(
-            prompt,
+    base_event: dict[str, Any] = {
+        **pre_metadata,
+        "agent": selected_agent,
+        "backend": selected_backend,
+        "read_only": subagent.is_read_only,
+        "permission_mode": permissions.permission_mode or "default",
+        "allowed_tools": permissions.allowed_tools,
+        "disallowed_tools": permissions.disallowed_tools,
+        "skills": [str(skill) for skill in subagent.skills],
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    try:
+        # Custom gate: a configured pre_phase hook can veto the phase; the
+        # rejection is recorded as a failed-phase event like any other error.
+        run_custom_hooks(
+            "pre_phase",
+            hooks_config,
             repo_path,
-            allowed_tools=permissions.allowed_tools,
-            disallowed_tools=permissions.disallowed_tools,
-            permission_mode=permissions.permission_mode,
-            max_budget_usd=max_budget_usd,
-            timeout_seconds=timeout_seconds,
-            stream=stream,
-            phase=phase,
-            append_system_prompt=skills_system_prompt,
+            {"phase": phase, "agent": selected_agent, "backend": selected_backend},
         )
-    elif selected_agent == "codex" and selected_backend == "cli":
-        output = run_codex_prompt(
-            prompt,
-            repo_path,
-            allowed_tools=permissions.allowed_tools,
-            disallowed_tools=permissions.disallowed_tools,
-            permission_mode=permissions.permission_mode,
-            max_budget_usd=max_budget_usd,
-            timeout_seconds=timeout_seconds,
-            stream=stream,
-            phase=phase,
-        )
-    elif selected_agent == "codex":
-        raise ValueError("Codex agent supports only backend 'cli'")
-    else:
-        raise ValueError(f"Unsupported agent/backend: {selected_agent}/{selected_backend}")
-    logger.info(
-        "✔ %s finished in %.1fs (%d chars)", phase, time.monotonic() - started_at, len(output)
-    )
-    if not subagent.is_read_only:
-        branch_after_phase = get_current_branch(repo_path)
-        if is_protected_branch(branch_after_phase):
-            raise RuntimeError(
-                f"Phase '{phase}' left the repository on protected branch "
-                f"'{branch_after_phase}'."
+        if selected_agent == "claude" and selected_backend == "cli":
+            output = run_claude_prompt(
+                prompt,
+                repo_path,
+                allowed_tools=permissions.allowed_tools,
+                disallowed_tools=permissions.disallowed_tools,
+                permission_mode=permissions.permission_mode,
+                max_budget_usd=max_budget_usd,
+                timeout_seconds=timeout_seconds,
+                stream=stream,
+                phase=phase,
+                append_system_prompt=skills_system_prompt,
             )
-    post_metadata = post_phase_hook(phase, output)
+        elif selected_agent == "codex" and selected_backend == "cli":
+            output = run_codex_prompt(
+                prompt,
+                repo_path,
+                allowed_tools=permissions.allowed_tools,
+                disallowed_tools=permissions.disallowed_tools,
+                permission_mode=permissions.permission_mode,
+                max_budget_usd=max_budget_usd,
+                timeout_seconds=timeout_seconds,
+                stream=stream,
+                phase=phase,
+            )
+        elif selected_agent == "codex":
+            raise ValueError("Codex agent supports only backend 'cli'")
+        else:
+            raise ValueError(f"Unsupported agent/backend: {selected_agent}/{selected_backend}")
+        logger.info(
+            "✔ %s finished in %.1fs (%d chars)", phase, time.monotonic() - started_at, len(output)
+        )
+        if not subagent.is_read_only:
+            branch_after_phase = get_current_branch(repo_path)
+            if is_protected_branch(branch_after_phase):
+                raise RuntimeError(
+                    f"Phase '{phase}' left the repository on protected branch "
+                    f"'{branch_after_phase}'."
+                )
+        post_metadata = post_phase_hook(phase, output)
+    except Exception as error:
+        # The failed phase is exactly the one an audit needs; record it before
+        # propagating instead of leaving the events log without the failure.
+        _append_phase_event(
+            run_dir,
+            {
+                **base_event,
+                "status": "failed",
+                "error": str(error),
+                "duration_seconds": round(time.monotonic() - started_at, 1),
+            },
+        )
+        raise
     _append_phase_event(
         run_dir,
         {
-            **pre_metadata,
+            **base_event,
             **post_metadata,
+            "duration_seconds": round(time.monotonic() - started_at, 1),
+        },
+    )
+    run_custom_hooks(
+        "post_phase",
+        hooks_config,
+        repo_path,
+        {
+            "phase": phase,
             "agent": selected_agent,
             "backend": selected_backend,
-            "read_only": subagent.is_read_only,
-            "permission_mode": permissions.permission_mode or "default",
-            "allowed_tools": permissions.allowed_tools,
-            "disallowed_tools": permissions.disallowed_tools,
-            "skills": [str(skill) for skill in subagent.skills],
+            "status": "completed",
+            "output_length": str(len(output)),
         },
     )
     return output
@@ -697,6 +743,16 @@ def run_orchestrator(
         isinstance(command, str) for command in blocked_commands
     ):
         raise ValueError("blocked_commands must be a list of strings")
+    hooks_config = load_hooks_config(config, blocked_commands)
+    if not hooks_config.is_empty:
+        logger.info(
+            "Custom hooks: %s",
+            ", ".join(
+                f"{event} x{len(entries)}"
+                for event, entries in hooks_config.hooks.items()
+                if entries
+            ),
+        )
     timeout_seconds = verification_config.get("timeout_seconds", 120)
     if not isinstance(timeout_seconds, int) or timeout_seconds <= 0:
         raise ValueError("verification.timeout_seconds must be a positive integer")
@@ -942,6 +998,7 @@ def run_orchestrator(
                     timeout_seconds=phase_timeout_seconds,
                     stream=stream,
                     run_dir=run_dir,
+                    hooks_config=hooks_config,
                 )
             _write_markdown(run_dir / "planner_output.md", planner_output)
 
@@ -997,6 +1054,7 @@ def run_orchestrator(
                 timeout_seconds=phase_timeout_seconds,
                 stream=stream,
                 run_dir=run_dir,
+                hooks_config=hooks_config,
             )
             _write_markdown(run_dir / "implementer_output.md", implementer_output)
             diff = get_git_diff(active_repo_path)
@@ -1010,7 +1068,11 @@ def run_orchestrator(
                 )
 
             verification_results = run_verification_commands(
-                active_repo_path, raw_commands, blocked_commands, timeout_seconds
+                active_repo_path,
+                raw_commands,
+                blocked_commands,
+                timeout_seconds,
+                hooks_config=hooks_config,
             )
             _write_verification(run_dir / "verification_attempt_1.txt", verification_results)
             passed = verification_passed(verification_results)
@@ -1042,10 +1104,15 @@ def run_orchestrator(
                     timeout_seconds=phase_timeout_seconds,
                     stream=stream,
                     run_dir=run_dir,
+                    hooks_config=hooks_config,
                 )
                 _write_markdown(run_dir / f"fixer_output_attempt_{fix_attempts}.md", fixer_output)
                 verification_results = run_verification_commands(
-                    active_repo_path, raw_commands, blocked_commands, timeout_seconds
+                    active_repo_path,
+                raw_commands,
+                blocked_commands,
+                timeout_seconds,
+                hooks_config=hooks_config,
                 )
                 _write_verification(
                     run_dir / f"verification_attempt_{fix_attempts + 1}.txt", verification_results
@@ -1077,6 +1144,7 @@ def run_orchestrator(
                 timeout_seconds=phase_timeout_seconds,
                 stream=stream,
                 run_dir=run_dir,
+                hooks_config=hooks_config,
             )
             _write_markdown(run_dir / "reviewer_output.md", reviewer_output)
             review_verdict = extract_verdict(reviewer_output)

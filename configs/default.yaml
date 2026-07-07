@@ -53,3 +53,16 @@ rules:
   - Do not execute full notebooks.
   - Prefer targeted tests.
   - Prefer minimal changes.
+
+# Optional custom hooks: external commands run at fixed orchestration points.
+# pre_* hooks are gates (non-zero exit aborts the phase/command); post_* hooks
+# are informational (failures are logged, never change the outcome). Context
+# arrives via AGENT_LOOP_* environment variables (EVENT, REPO, PHASE, AGENT,
+# BACKEND, STATUS, OUTPUT_LENGTH, COMMAND, RETURN_CODE). Hook commands run
+# without a shell and obey blocked_commands.
+# hooks:
+#   pre_phase:
+#     - command: python scripts/guard.py
+#       timeout_seconds: 30
+#   post_phase:
+#     - python scripts/notify.py

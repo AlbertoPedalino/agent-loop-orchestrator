@@ -3,35 +3,20 @@
 from __future__ import annotations
 
 from pathlib import Path
-import shlex
-import shutil
 import subprocess
-import sys
 
-from agent.hooks import post_command_hook, pre_command_hook
+from agent.hooks import (
+    HooksConfig,
+    post_command_hook,
+    pre_command_hook,
+    resolve_executable,
+    run_custom_hooks,
+    split_command,
+)
 from agent.policies import validate_commands_allowed
 
-
-def _split_command(command: str) -> list[str]:
-    """Split a command string into argv using platform-appropriate rules.
-
-    POSIX splitting eats backslashes, which corrupts Windows paths such as
-    ``C:\\tools\\python``; ``posix=False`` preserves them on Windows.
-    """
-    return shlex.split(command, posix=sys.platform != "win32")
-
-
-def _resolve_executable(arguments: list[str]) -> list[str]:
-    """Resolve argv[0] against PATH so shim scripts launch without a shell.
-
-    On Windows, ``CreateProcess`` only appends ``.exe`` when searching, so npm
-    (``npm.cmd``) and similar launcher scripts are not found by bare name; a
-    ``shutil.which`` lookup honors ``PATHEXT`` and returns the full script path.
-    """
-    resolved = shutil.which(arguments[0])
-    if resolved is None:
-        return arguments
-    return [resolved, *arguments[1:]]
+_split_command = split_command
+_resolve_executable = resolve_executable
 
 
 def run_verification_commands(
@@ -39,11 +24,14 @@ def run_verification_commands(
     commands: list[str],
     blocked_commands: list[str] | None = None,
     timeout_seconds: int | None = None,
+    hooks_config: HooksConfig | None = None,
 ) -> dict[str, str]:
     """Run all allowed verification commands without invoking a shell.
 
     Results are collected for every command, including non-zero exits, instead
-    of stopping at the first test failure.
+    of stopping at the first test failure. Custom ``pre_command`` hooks gate
+    each command (a rejection is recorded as that command's result);
+    ``post_command`` hooks receive the outcome and never affect it.
     """
     resolved_repo_path = repo_path.expanduser().resolve()
     if not resolved_repo_path.is_dir():
@@ -57,6 +45,13 @@ def run_verification_commands(
     results: dict[str, str] = {}
     for command in commands:
         pre_command_hook(command, blocked_commands or [])
+        try:
+            run_custom_hooks(
+                "pre_command", hooks_config, resolved_repo_path, {"command": command}
+            )
+        except Exception as error:  # noqa: BLE001 - a hook rejection is this command's result
+            results[command] = f"exit code: rejected\nstdout:\n\nstderr:\n{error}"
+            continue
         try:
             arguments = _split_command(command)
             if not arguments:
@@ -78,6 +73,12 @@ def run_verification_commands(
                 f"stderr:\n{completed.stderr}"
             )
             post_command_hook(command, completed.returncode, completed.stdout + completed.stderr)
+            run_custom_hooks(
+                "post_command",
+                hooks_config,
+                resolved_repo_path,
+                {"command": command, "return_code": str(completed.returncode)},
+            )
         except (OSError, ValueError, subprocess.TimeoutExpired) as error:
             results[command] = f"exit code: unavailable\nstdout:\n\nstderr:\nCould not run command: {error}"
     return results
