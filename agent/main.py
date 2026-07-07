@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -108,8 +109,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--subagents-config",
         type=Path,
-        default=PROJECT_ROOT / "configs" / "subagents.default.yaml",
-        help="Subagent YAML configuration file.",
+        default=None,
+        help=(
+            "Explicit subagent YAML configuration file. When omitted, the "
+            "orchestrator defaults are merged with the target repository's "
+            ".agent-loop/subagents.yaml overlay."
+        ),
     )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
@@ -288,10 +293,21 @@ def _resolve_run_invocation(args: argparse.Namespace, parser: argparse.ArgumentP
     )
 
 
+def _normalize_argv(argv: list[str]) -> list[str]:
+    """Support the ergonomic ``agent-loop run <file>`` form.
+
+    ``run <file>`` is sugar for ``--run-file <file>``; every other invocation is
+    passed through unchanged, so the flat flag interface stays intact.
+    """
+    if len(argv) >= 2 and argv[0] == "run" and not argv[1].startswith("-"):
+        return ["--run-file", *argv[1:]]
+    return argv
+
+
 def main() -> int:
     """Parse CLI arguments and execute the selected orchestration mode."""
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(_normalize_argv(sys.argv[1:]))
     configure_logging(verbose=args.verbose, quiet=args.quiet)
     if args.max_fix_attempts is not None and args.max_fix_attempts < 0:
         parser.error("--max-fix-attempts must be zero or greater")

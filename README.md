@@ -9,6 +9,27 @@ task -> target validation -> optional worktree -> planner -> implementer
 
 It is designed to keep orchestration policy outside the target repository. It does not commit, push, delete branches, or modify protected branches. Worktree cleanup is opt-in and removes only clean worktrees created by the current run.
 
+## Installation
+
+Install with [pipx](https://pipx.pypa.io) to get the `agent-loop` and `agent-queue` commands on your PATH, usable from any directory:
+
+```bash
+pipx install git+https://github.com/<owner>/agent-loop-orchestrator
+# or, from a local clone:
+pipx install /path/to/agent-loop-orchestrator
+```
+
+Typical usage from a target repository (the current directory is the target repo unless the run file sets `repo_path`):
+
+```bash
+cd /path/to/target-repo
+agent-loop run .agent-loop/tasks/my-task.yaml      # run one task directly
+agent-queue add .agent-loop/tasks/my-task.yaml     # or enqueue it...
+agent-queue run --workers 1                        # ...and drain the queue (from anywhere)
+```
+
+For development, a plain editable install inside a venv provides the same commands: `pip install -e .[dev]`.
+
 ## Architecture
 
 - `agent/main.py` provides the CLI.
