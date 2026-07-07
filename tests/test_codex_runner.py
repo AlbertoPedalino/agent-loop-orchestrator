@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import subprocess
+import threading
 
 import pytest
 
@@ -81,6 +82,32 @@ def test_windows_powershell_codex_shim_is_launched_via_powershell(
 
     assert _prefix_for_codex_path(str(script)) == [
         "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+    ]
+
+
+def test_windowsapps_pwsh_alias_is_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    script = tmp_path / "codex.ps1"
+    script.write_text("", encoding="utf-8")
+
+    def fake_which(name: str) -> str | None:
+        if name in {"pwsh", "pwsh.exe"}:
+            return r"C:\Users\alber\AppData\Local\Microsoft\WindowsApps\pwsh.exe"
+        if name == "powershell":
+            return r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        return None
+
+    monkeypatch.setattr("agent.codex_runner.os.name", "nt")
+    monkeypatch.setattr("agent.codex_runner.shutil.which", fake_which)
+
+    assert _prefix_for_codex_path(str(script)) == [
+        r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
         "-NoProfile",
         "-ExecutionPolicy",
         "Bypass",
@@ -273,6 +300,52 @@ def test_streaming_prompt_reads_stdin_file_and_streams_stdout(
     assert captured["input"].startswith("plan")
     assert Path(captured["stdin_name"]).name == "prompt.md"
     assert "--json" in captured["command"]
+
+
+def test_streaming_timeout_kills_process_without_waiting_for_stdout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    killed = threading.Event()
+
+    class BlockingStdout:
+        def __iter__(self):
+            return self
+
+        def __next__(self) -> str:
+            killed.wait(timeout=1)
+            raise StopIteration
+
+    class FakeStderr:
+        def readlines(self) -> list[str]:
+            killed.wait(timeout=1)
+            return []
+
+    class FakeProcess:
+        def __init__(self, command: list[str], **kwargs: object) -> None:
+            self.stdout = BlockingStdout()
+            self.stderr = FakeStderr()
+
+        def wait(self) -> int:
+            killed.wait(timeout=1)
+            return 0
+
+        def kill(self) -> None:
+            killed.set()
+
+    monkeypatch.setattr("agent.codex_runner.subprocess.Popen", FakeProcess)
+    monkeypatch.setattr("agent.codex_runner._resolve_codex_command_prefix", lambda: ["codex.cmd"])
+
+    with pytest.raises(CodexRunnerError, match="timed out after"):
+        run_codex_prompt(
+            "plan",
+            tmp_path,
+            stream=True,
+            timeout_seconds=0.01,
+            phase="planner",
+            transient_retries=0,
+        )
+
+    assert killed.is_set()
 
 
 def test_captured_nonzero_result_raises_with_safe_context(
