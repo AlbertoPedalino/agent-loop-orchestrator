@@ -116,7 +116,7 @@ def test_windowsapps_pwsh_alias_is_skipped(
     ]
 
 
-def test_windows_cmd_shim_prefers_adjacent_powershell_shim(
+def test_windows_cmd_shim_is_used_directly(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     cmd = tmp_path / "codex.cmd"
@@ -124,22 +124,11 @@ def test_windows_cmd_shim_prefers_adjacent_powershell_shim(
     script = tmp_path / "codex.ps1"
     script.write_text("", encoding="utf-8")
     monkeypatch.setattr("agent.codex_runner.os.name", "nt")
-    monkeypatch.setattr(
-        "agent.codex_runner.shutil.which",
-        lambda name: "powershell.exe" if name == "powershell" else None,
-    )
 
-    assert _prefix_for_codex_path(str(cmd)) == [
-        "powershell.exe",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        str(script),
-    ]
+    assert _prefix_for_codex_path(str(cmd)) == [str(cmd)]
 
 
-def test_windows_resolver_prefers_powershell_shim(
+def test_windows_resolver_prefers_cmd_shim_over_powershell_shim(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     script = tmp_path / "codex.ps1"
@@ -159,14 +148,7 @@ def test_windows_resolver_prefers_powershell_shim(
     monkeypatch.setattr("agent.codex_runner.os.name", "nt")
     monkeypatch.setattr("agent.codex_runner.shutil.which", fake_which)
 
-    assert _resolve_codex_command_prefix() == [
-        "powershell.exe",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        str(script),
-    ]
+    assert _resolve_codex_command_prefix() == [str(cmd)]
 
 
 def test_sandbox_follows_phase_mutability() -> None:

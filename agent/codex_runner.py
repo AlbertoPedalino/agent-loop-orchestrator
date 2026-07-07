@@ -154,17 +154,13 @@ def _prefix_for_codex_path(path: str) -> list[str]:
     if os.name == "nt":
         if resolved.suffix.lower() == ".ps1":
             return _powershell_prefix_for_script(resolved)
-        if resolved.suffix.lower() in {".cmd", ".bat"}:
-            powershell_shim = resolved.with_suffix(".ps1")
-            if powershell_shim.is_file():
-                return _powershell_prefix_for_script(powershell_shim)
     return [str(resolved)]
 
 
 def _resolve_codex_command_prefix() -> list[str]:
     """Resolve npm/PowerShell shims that Python cannot execute as plain ``codex``."""
     if os.name == "nt":
-        for executable_name in ("codex.ps1", "codex.cmd", "codex.exe", "codex.bat"):
+        for executable_name in ("codex.exe", "codex.cmd", "codex.bat", "codex.ps1"):
             found = shutil.which(executable_name)
             if found is not None:
                 return _prefix_for_codex_path(found)
