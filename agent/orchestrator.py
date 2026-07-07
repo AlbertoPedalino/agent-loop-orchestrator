@@ -327,6 +327,14 @@ def _run_phase(
             f"Refusing to run write-capable phase '{phase}' on protected branch "
             f"'{current_branch}'. Use an isolated agent worktree or in-place agent branch."
         )
+    if run_dir is not None and (subagent.skills or skills_system_prompt):
+        # The pre-phase prompt artifacts are written before skill injection;
+        # record what the backend actually received so skill delivery is auditable.
+        sent = prompt if skills_system_prompt is None else (
+            f"<!-- system prompt appended via CLI flag -->\n{skills_system_prompt}\n"
+            f"<!-- end system prompt -->\n\n{prompt}"
+        )
+        (run_dir / f"{phase}_prompt_sent.md").write_text(sent, encoding="utf-8")
     pre_metadata = pre_phase_hook(phase, repo_path, task)
     logger.info(
         "▶ %s starting (agent=%s, backend=%s, %s, tools=%s, skills=%s)",

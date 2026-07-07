@@ -12,6 +12,10 @@ dependencies = [
     "PyYAML>=6.0",
 ]
 
+[project.scripts]
+agent-loop = "agent.main:main"
+agent-queue = "agent.queue_cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",

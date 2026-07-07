@@ -29,3 +29,11 @@ def test_allowed_and_failing_commands_are_collected(
     assert "exit code: 1" in output["python -m compileall agent"]
     assert not verification_passed(output)
     validate_commands_allowed(["pytest -q"], ["git push"])
+
+
+def test_shim_executables_are_resolved_via_path(tmp_path: Path) -> None:
+    # `git` resolves everywhere; on Windows a bare name like `npm` only works
+    # because argv[0] is resolved with shutil.which (PATHEXT-aware) first.
+    results = run_verification_commands(tmp_path, ["git --version"])
+
+    assert verification_passed(results)

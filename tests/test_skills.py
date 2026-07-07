@@ -88,8 +88,10 @@ def test_inline_for_codex_prepends_repo_local_skill_bodies(tmp_path: Path) -> No
     assert combined.startswith("# Required Skills")
     assert "## Skill: frontend-design" in combined
     assert "Follow existing UI conventions." in combined
-    assert "Apply with args: `dense`." in combined
-    assert combined.rstrip().endswith("Implement the change.")
+    assert "MANDATORY for this phase: apply this skill in mode/level `dense`." in combined
+    assert "Implement the change." in combined
+    # A compliance reminder is restated after the task for recency.
+    assert combined.rstrip().endswith("`frontend-design` at `dense`.")
 
 
 def test_inline_for_codex_falls_back_to_user_scope(tmp_path: Path) -> None:
@@ -140,7 +142,7 @@ def test_inline_for_codex_resolves_installed_plugin_skills(tmp_path: Path) -> No
 
     assert "## Skill: caveman:caveman" in combined
     assert "Talk like caveman." in combined
-    assert "Apply with args: `wenyan-ultra`." in combined
+    assert "mode/level `wenyan-ultra`" in combined
 
 
 def test_inline_for_codex_reports_missing_skills_clearly(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -18,6 +19,19 @@ def _split_command(command: str) -> list[str]:
     ``C:\\tools\\python``; ``posix=False`` preserves them on Windows.
     """
     return shlex.split(command, posix=sys.platform != "win32")
+
+
+def _resolve_executable(arguments: list[str]) -> list[str]:
+    """Resolve argv[0] against PATH so shim scripts launch without a shell.
+
+    On Windows, ``CreateProcess`` only appends ``.exe`` when searching, so npm
+    (``npm.cmd``) and similar launcher scripts are not found by bare name; a
+    ``shutil.which`` lookup honors ``PATHEXT`` and returns the full script path.
+    """
+    resolved = shutil.which(arguments[0])
+    if resolved is None:
+        return arguments
+    return [resolved, *arguments[1:]]
 
 
 def run_verification_commands(
@@ -49,7 +63,7 @@ def run_verification_commands(
                 results[command] = "exit code: skipped\nstdout:\n\nstderr:\nEmpty command."
                 continue
             completed = subprocess.run(
-                arguments,
+                _resolve_executable(arguments),
                 cwd=resolved_repo_path,
                 capture_output=True,
                 text=True,

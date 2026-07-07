@@ -51,7 +51,9 @@ from agent.run_file import RunFileConfig, parse_run_data, resolve_task_text
 
 logger = get_logger()
 
-DEFAULT_QUEUE_DIR = Path("tasks") / "queue"
+# Anchored to the orchestrator repository, not the caller's cwd, so `add` can
+# run from any target repository without an explicit --queue-dir.
+DEFAULT_QUEUE_DIR = Path(__file__).resolve().parent.parent / "tasks" / "queue"
 RETRY_BACKOFF_BASE_SECONDS = 30.0
 
 # A claim marker older than this is treated as left behind by a crashed worker

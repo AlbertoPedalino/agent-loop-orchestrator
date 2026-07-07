@@ -65,16 +65,50 @@ def get_git_status(path: Path, timeout_seconds: int = 30) -> str:
 
 
 def get_git_diff(path: Path, timeout_seconds: int = 30) -> str:
-    """Return an unstaged Git diff with timeout-safe diagnostics."""
+    """Return the full working-tree diff against HEAD, including untracked files.
+
+    Staged, unstaged, and untracked changes are all part of what an agent phase
+    produced; a diff of only unstaged edits makes a new (never-added) file
+    invisible to the fixer and reviewer, which then misdiagnose it as missing.
+    Untracked files are rendered through ``git diff --no-index`` against the
+    null device so they appear as ordinary additions.
+    """
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be greater than zero")
     try:
-        result = _run_git(path, "diff", "--no-ext-diff", timeout=timeout_seconds)
+        result = _run_git(path, "diff", "HEAD", "--no-ext-diff", timeout=timeout_seconds)
+        if result.returncode != 0:
+            # e.g. an unborn HEAD (no commits yet): fall back to the plain diff.
+            result = _run_git(path, "diff", "--no-ext-diff", timeout=timeout_seconds)
+        if result.returncode != 0:
+            return result.stderr.strip() or "Unable to read Git diff."
+        sections = [result.stdout]
+        untracked = _run_git(
+            path, "ls-files", "--others", "--exclude-standard", timeout=timeout_seconds
+        )
+        if untracked.returncode == 0:
+            for file_name in untracked.stdout.splitlines():
+                if not file_name.strip():
+                    continue
+                # --no-index exits 1 when the files differ; that is the expected
+                # outcome here, not an error.
+                file_diff = _run_git(
+                    path,
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-index",
+                    "--",
+                    "/dev/null",
+                    file_name,
+                    timeout=timeout_seconds,
+                )
+                if file_diff.stdout.strip():
+                    sections.append(file_diff.stdout)
     except subprocess.TimeoutExpired:
         return f"Git diff timed out after {timeout_seconds} seconds."
     except OSError as error:
         return f"Unable to read Git diff: {error}"
-    return result.stdout if result.returncode == 0 else result.stderr.strip() or "Unable to read Git diff."
+    return "".join(sections)
 
 
 def is_protected_branch(branch: str) -> bool:

@@ -195,13 +195,28 @@ def inline_skills_for_codex(
     """
     resolved_home = claude_home if claude_home is not None else _default_claude_home()
     sections: list[str] = []
+    reminders: list[str] = []
     for ref in skills:
         skill_path = _resolve_skill_file(ref.name, repo_path, resolved_home)
         body = skill_path.read_text(encoding="utf-8").strip()
-        args_note = f"\n\nApply with args: `{ref.args}`." if ref.args else ""
+        args_note = (
+            f"\n\nMANDATORY for this phase: apply this skill in mode/level `{ref.args}`. "
+            "Ignore any activation triggers or commands it mentions; it is already active."
+            if ref.args
+            else "\n\nMANDATORY for this phase: apply this skill. Ignore any activation "
+            "triggers or commands it mentions; it is already active."
+        )
         sections.append(f"## Skill: {ref.name}\n\n{body}{args_note}")
+        reminders.append(f"`{ref.name}`" + (f" at `{ref.args}`" if ref.args else ""))
     header = (
         "# Required Skills\n\n"
-        "Apply the following skill instructions throughout this phase.\n\n"
+        "The following skill instructions are mandatory for this phase, not optional "
+        "context.\n\n"
     )
-    return header + "\n\n".join(sections) + "\n\n---\n\n" + prompt
+    # Restated after the task because instructions closest to the end of the
+    # prompt are followed most reliably.
+    reminder = (
+        "\n\n---\n\nReminder: your final report MUST follow the required skill(s) "
+        f"above: {', '.join(reminders)}."
+    )
+    return header + "\n\n".join(sections) + "\n\n---\n\n" + prompt + reminder
