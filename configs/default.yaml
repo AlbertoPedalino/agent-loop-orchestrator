@@ -17,8 +17,8 @@ git:
   allow_dirty: false         # permit switching branches with a dirty work tree
   worktree_root: ../agent-worktrees
   require_clean_repo: false
-  delete_worktree_on_success: false
-  delete_worktree_on_failure: false
+  delete_worktree_on_success: false  # remove clean worktrees created by the run
+  delete_worktree_on_failure: false  # remove clean worktrees created by the run
 
 limits:
   max_fix_attempts: 3
@@ -30,6 +30,8 @@ limits:
 memory:
   enabled: true                 # inject + update accumulated project knowledge
   file: .agent-loop/memory.md   # path relative to the target repository root
+  history: true                 # record run outcomes and inject recent ones
+  history_file: .agent-loop/history.jsonl
 
 verification:
   timeout_seconds: 120

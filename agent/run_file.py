@@ -99,6 +99,16 @@ def load_run_file(path: Path) -> RunFileConfig:
         data = yaml.safe_load(handle)
     if data is None:
         raise ValueError(f"Run file is empty: {resolved}")
+    return parse_run_data(data)
+
+
+def parse_run_data(data: object) -> RunFileConfig:
+    """Validate an already-loaded run-parameter mapping.
+
+    Shared by run files and queue task files, which carry the same run
+    parameters plus queue-only metadata that the queue strips before calling
+    this.
+    """
     if not isinstance(data, dict):
         raise ValueError("Run file root must be a YAML mapping")
 

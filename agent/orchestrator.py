@@ -28,19 +28,38 @@ from agent.git_utils import (
     get_git_status,
     is_protected_branch,
     remote_branch_exists,
+    remove_worktree,
 )
 from agent.hooks import post_phase_hook, pre_phase_hook
 from agent.memory import (
     MEMORY_UPDATE_INSTRUCTION,
     MemoryConfig,
+    append_history,
+    format_history_section,
     format_memory_section,
     load_memory,
+    load_recent_history,
     resolve_memory_config,
     update_memory_from_output,
 )
 from agent.permissions import resolve_phase_permissions
 from agent.report import write_report
-from agent.subagents import SubagentConfig, load_subagents_config
+from agent.review_gate import (
+    VERDICT_FILE_NAME,
+    VERDICT_INSTRUCTION,
+    ReviewVerdict,
+    extract_verdict,
+)
+from agent.skills import (
+    allowed_tools_with_skill,
+    format_skills_system_prompt,
+    inline_skills_for_codex,
+)
+from agent.subagents import (
+    SubagentConfig,
+    load_subagents_config,
+    load_subagents_with_target_overlay,
+)
 from agent.verifier import run_verification_commands, verification_passed
 
 
@@ -67,6 +86,7 @@ class OrchestrationResult:
     status: str
     target_repo_path: Path
     worktree_path: Path | None = None
+    review_verdict: ReviewVerdict | None = None
 
 
 @dataclass(frozen=True)
@@ -128,6 +148,13 @@ def _mapping(config: dict[str, Any], key: str) -> dict[str, Any]:
     return value
 
 
+def _optional_bool(config: dict[str, Any], key: str, default: bool = False) -> bool:
+    value = config.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"Configuration '{key}' must be a boolean")
+    return value
+
+
 def _resolve_agent_provider(config: dict[str, Any], override: str | None) -> str:
     if override is not None:
         return override
@@ -145,10 +172,21 @@ def _resolve_agent_provider(config: dict[str, Any], override: str | None) -> str
 
 
 def _create_run_dir(runs_root: Path) -> Path:
+    """Create a unique run directory, disambiguating concurrent creations.
+
+    Parallel queue workers can start runs in the same instant; a numeric suffix
+    resolves the (already microsecond-rare) timestamp collision instead of
+    failing the run.
+    """
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    run_dir = runs_root / timestamp
-    run_dir.mkdir(parents=True, exist_ok=False)
-    return run_dir
+    for attempt in range(100):
+        run_dir = runs_root / (timestamp if attempt == 0 else f"{timestamp}-{attempt}")
+        try:
+            run_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            continue
+        return run_dir
+    raise RuntimeError(f"Could not create a unique run directory under {runs_root}")
 
 
 def _write_markdown(path: Path, content: str) -> None:
@@ -212,6 +250,7 @@ def _read_prompt(
     project_context: str = "",
     project_memory: str = "",
     request_memory_update: bool = False,
+    request_verdict: bool = False,
 ) -> str:
     template = subagent.prompt_template.read_text(encoding="utf-8").strip()
     return (
@@ -225,6 +264,7 @@ def _read_prompt(
         + "\nSafety constraints: do not commit, push, switch to a protected branch, "
         "run blocked commands, or change files outside the requested scope.\n"
         + (f"\n{context.strip()}\n" if context.strip() else "")
+        + (f"\n{VERDICT_INSTRUCTION}" if request_verdict else "")
         + (f"\n{MEMORY_UPDATE_INSTRUCTION}" if request_memory_update else "")
     )
 
@@ -262,9 +302,24 @@ def _run_phase(
     Read-only phases (no write-capable tools) may run on a protected branch
     because their tool policy prevents any modification. Write-capable phases are
     refused on a protected branch and must never leave the repository on one.
+
+    Declared skills are policy, not payload: for the Claude backend the CLI
+    discovers skill content natively, so the phase only gains the ``Skill`` tool
+    plus a system-prompt instruction to invoke them. Codex has no skill loader,
+    so repository-local skill bodies are inlined into the prompt instead.
     """
+    selected_agent = subagent.agent or agent
+    selected_backend = subagent.backend or backend
+    phase_allowed_tools = subagent.allowed_tools
+    skills_system_prompt: str | None = None
+    if subagent.skills:
+        if selected_agent == "claude":
+            phase_allowed_tools = allowed_tools_with_skill(phase_allowed_tools)
+            skills_system_prompt = format_skills_system_prompt(subagent.skills)
+        else:
+            prompt = inline_skills_for_codex(prompt, subagent.skills, repo_path)
     permissions = resolve_phase_permissions(
-        subagent.allowed_tools, subagent.permission_mode, blocked_commands or []
+        phase_allowed_tools, subagent.permission_mode, blocked_commands or []
     )
     current_branch = get_current_branch(repo_path)
     if not subagent.is_read_only and is_protected_branch(current_branch):
@@ -273,15 +328,14 @@ def _run_phase(
             f"'{current_branch}'. Use an isolated agent worktree or in-place agent branch."
         )
     pre_metadata = pre_phase_hook(phase, repo_path, task)
-    selected_agent = subagent.agent or agent
-    selected_backend = subagent.backend or backend
     logger.info(
-        "▶ %s starting (agent=%s, backend=%s, %s, tools=%s)",
+        "▶ %s starting (agent=%s, backend=%s, %s, tools=%s, skills=%s)",
         phase,
         selected_agent,
         selected_backend,
         "read-only" if subagent.is_read_only else f"write/{permissions.permission_mode or 'default'}",
         ",".join(permissions.allowed_tools) or "none",
+        ",".join(str(skill) for skill in subagent.skills) or "none",
     )
     started_at = time.monotonic()
     if selected_agent == "claude" and selected_backend == "cli":
@@ -295,6 +349,7 @@ def _run_phase(
             timeout_seconds=timeout_seconds,
             stream=stream,
             phase=phase,
+            append_system_prompt=skills_system_prompt,
         )
     elif selected_agent == "codex" and selected_backend == "cli":
         output = run_codex_prompt(
@@ -334,6 +389,7 @@ def _run_phase(
             "permission_mode": permissions.permission_mode or "default",
             "allowed_tools": permissions.allowed_tools,
             "disallowed_tools": permissions.disallowed_tools,
+            "skills": [str(skill) for skill in subagent.skills],
         },
     )
     return output
@@ -413,6 +469,46 @@ def _wants_in_place_branch(create_branch: str, plan_only: bool, setup_only: bool
     return not setup_only
 
 
+def load_resumable_planner_output(run_dir: Path) -> str | None:
+    """Return a previous run's planner output when it can seed a resumed run.
+
+    A retry does not need to re-plan when the earlier attempt already produced a
+    plan; the failure was in implementation or verification. Only a non-empty,
+    non-dry-run planner output is resumable.
+    """
+    planner_path = run_dir / "planner_output.md"
+    if not planner_path.is_file():
+        return None
+    content = planner_path.read_text(encoding="utf-8").strip()
+    if not content or content.startswith("# Dry-run"):
+        return None
+    return content
+
+
+def _record_run_history(
+    memory_config: MemoryConfig,
+    *,
+    task: str,
+    status: str,
+    fix_attempts: int,
+    run_dir: Path,
+) -> None:
+    """Append this run's outcome to the cross-run history log (best effort)."""
+    try:
+        append_history(
+            memory_config,
+            {
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "task": " ".join(task.split())[:200],
+                "status": status,
+                "fix_attempts": fix_attempts,
+                "run_dir": str(run_dir),
+            },
+        )
+    except OSError as error:  # history must never mask the real outcome
+        logger.warning("Could not append run history: %s", error)
+
+
 def _record_memory_update(memory_config: MemoryConfig, output: str) -> str:
     """Persist a memory block from *output* and return a report-friendly status."""
     if not memory_config.enabled:
@@ -429,6 +525,42 @@ def _finalize_git_details(details: dict[str, str | int], repo_path: Path) -> Non
     except Exception:  # noqa: BLE001 - reporting must never mask the real outcome
         details["final branch"] = "unknown"
     details["working tree dirty at end"] = "yes" if get_git_status(repo_path).strip() else "no"
+
+
+def _cleanup_worktree_if_requested(
+    *,
+    details: dict[str, str | int],
+    source_repo_path: Path,
+    worktree_path: Path | None,
+    created_for_run: bool,
+    requested: bool,
+) -> None:
+    """Best-effort opt-in cleanup for clean worktrees created by this run."""
+    if not requested:
+        details["worktree cleanup"] = "not requested"
+        return
+    if worktree_path is None:
+        details["worktree cleanup"] = "not applicable"
+        return
+    if not created_for_run:
+        details["worktree cleanup"] = "skipped (worktree was reused)"
+        return
+
+    try:
+        resolved_source = source_repo_path.expanduser().resolve()
+        resolved_worktree = worktree_path.expanduser().resolve()
+        if resolved_source == resolved_worktree:
+            details["worktree cleanup"] = "skipped (source repository)"
+            return
+        if get_git_status(resolved_worktree).strip():
+            details["worktree cleanup"] = "skipped (working tree dirty)"
+            return
+        remove_worktree(resolved_source, resolved_worktree)
+    except Exception as error:  # noqa: BLE001 - cleanup must not mask run result
+        logger.warning("Worktree cleanup failed for %s: %s", worktree_path, error)
+        details["worktree cleanup"] = f"failed: {error}"
+    else:
+        details["worktree cleanup"] = f"removed {resolved_worktree}"
 
 
 def run_orchestrator(
@@ -456,6 +588,7 @@ def run_orchestrator(
     launched_from: str = "cli-args",
     repo_path_source: str = "cli --repo-path",
     stream: bool = True,
+    resume_from_run_dir: Path | None = None,
 ) -> OrchestrationResult:
     """Run the safe orchestration loop, or simulate it in ``dry_run`` mode.
 
@@ -464,6 +597,8 @@ def run_orchestrator(
     only the planner phase and then records read-only Git state.
     """
     project_root = Path(__file__).resolve().parent.parent
+    if resume_from_run_dir is not None and (plan_only or setup_only or dry_run):
+        raise ValueError("resume_from_run_dir requires a full implementation loop")
     resolved_repo_path = repo_path.expanduser().resolve()
     if not resolved_repo_path.is_dir():
         raise NotADirectoryError(f"Repository path is not a directory: {resolved_repo_path}")
@@ -480,7 +615,14 @@ def run_orchestrator(
     formatted_project_context = _format_project_context(project_context)
     # Memory persists in the main repository so it survives across runs/worktrees.
     memory_config = resolve_memory_config(config, resolved_repo_path)
-    formatted_project_memory = format_memory_section(load_memory(memory_config))
+    formatted_project_memory = "\n\n".join(
+        section
+        for section in (
+            format_memory_section(load_memory(memory_config)),
+            format_history_section(load_recent_history(memory_config)),
+        )
+        if section
+    )
     project_config = _mapping(config, "project")
     backend_config = _mapping(config, "backend")
     git_config = _mapping(config, "git")
@@ -513,6 +655,8 @@ def run_orchestrator(
     selected_allow_dirty = (
         allow_dirty if allow_dirty is not None else bool(git_config.get("allow_dirty", False))
     )
+    delete_worktree_on_success = _optional_bool(git_config, "delete_worktree_on_success")
+    delete_worktree_on_failure = _optional_bool(git_config, "delete_worktree_on_failure")
     selected_base_branch = base_branch or git_config.get("base_branch")
     selected_agent_branch = agent_branch or git_config.get("agent_branch")
     wants_in_place_branch = selected_branch_mode == "in_place" and _wants_in_place_branch(
@@ -563,8 +707,15 @@ def run_orchestrator(
     if not isinstance(phase_timeout_seconds, int) or phase_timeout_seconds <= 0:
         raise ValueError("limits.phase_timeout_seconds must be a positive integer")
 
-    subagents_path = subagents_config_path or project_root / "configs" / "subagents.default.yaml"
-    subagents = load_subagents_config(subagents_path)
+    if subagents_config_path is not None:
+        # An explicit file is full control: the target overlay does not apply.
+        subagents = load_subagents_config(subagents_config_path)
+        subagents_source = f"explicit --subagents-config ({subagents_config_path})"
+    else:
+        subagents, subagents_source = load_subagents_with_target_overlay(
+            project_root / "configs" / "subagents.default.yaml", resolved_repo_path
+        )
+    logger.info("Subagents: %s", subagents_source)
     required_subagents = ("planner", "implementer", "fixer", "reviewer")
     missing_subagents = [name for name in required_subagents if name not in subagents]
     if missing_subagents:
@@ -599,6 +750,8 @@ def run_orchestrator(
 
     active_repo_path = resolved_repo_path
     worktree_path: Path | None = None
+    worktree_created = False
+    reused_worktree = False
     current_branch = get_current_branch(resolved_repo_path)
     original_branch = current_branch
     branch_created = False
@@ -631,6 +784,8 @@ def run_orchestrator(
             )
             if reused_worktree:
                 worktree_note = f"using existing worktree at {worktree_path}"
+            else:
+                worktree_created = True
             active_repo_path = worktree_path
             current_branch = get_current_branch(active_repo_path)
     elif wants_in_place_branch:
@@ -671,6 +826,7 @@ def run_orchestrator(
         "repo path source": repo_path_source,
         "config path": str(resolved_config_path),
         "config source": config_source,
+        "subagents source": subagents_source,
         "target repository": str(active_repo_path),
         "branch mode": selected_branch_mode,
         "create branch mode": selected_create_branch,
@@ -682,17 +838,28 @@ def run_orchestrator(
         "in-place branch": in_place_note,
         "starting branch": current_branch,
         "worktree": str(worktree_path) if worktree_path else worktree_note,
+        "worktree created": "yes" if worktree_created else "no",
+        "worktree reused": "yes" if reused_worktree else "no",
+        "worktree cleanup": "not requested",
         "verification": "not run",
         "fix attempts": 0,
         "changed files": 0,
         "next steps": "Review the saved phase outputs before allowing any follow-up action.",
     }
 
+    review_verdict: ReviewVerdict | None = None
     try:
         if setup_only:
             status = "dry-run-setup" if dry_run else "setup-complete"
             details["next steps"] = "Run a planner phase separately; no agent phase was invoked."
             _finalize_git_details(details, active_repo_path)
+            _cleanup_worktree_if_requested(
+                details=details,
+                source_repo_path=resolved_repo_path,
+                worktree_path=worktree_path,
+                created_for_run=worktree_created,
+                requested=delete_worktree_on_success,
+            )
             report_path = write_report(run_dir, task, status, details)
             return OrchestrationResult(
                 run_dir, report_path, status, active_repo_path, worktree_path
@@ -730,29 +897,44 @@ def run_orchestrator(
             details["mode"] = "plan-only" if plan_only else "full-pipeline"
             status = "dry-run-plan-only" if plan_only else "dry-run"
         else:
-            planner_prompt = _read_prompt(
-                subagents["planner"],
-                task,
-                active_repo_path,
-                project_context=formatted_project_context,
-                project_memory=formatted_project_memory,
-                request_memory_update=memory_config.enabled and plan_only,
-            )
-            _write_markdown(run_dir / "planner_prompt.md", planner_prompt)
-            planner_output = _run_phase(
-                phase="planner",
-                prompt=planner_prompt,
-                task=task,
-                repo_path=active_repo_path,
-                agent=selected_agent,
-                backend=selected_backend,
-                subagent=subagents["planner"],
-                max_budget_usd=float(max_budget) if max_budget is not None else None,
-                blocked_commands=blocked_commands,
-                timeout_seconds=phase_timeout_seconds,
-                stream=stream,
-                run_dir=run_dir,
-            )
+            resumed_planner_output: str | None = None
+            if resume_from_run_dir is not None:
+                resumed_planner_output = load_resumable_planner_output(
+                    resume_from_run_dir.expanduser().resolve()
+                )
+                if resumed_planner_output is None:
+                    logger.info(
+                        "No resumable planner output in %s; running the planner.",
+                        resume_from_run_dir,
+                    )
+            if resumed_planner_output is not None:
+                planner_output = resumed_planner_output
+                details["planner"] = f"resumed from {resume_from_run_dir}"
+                logger.info("Reusing planner output from %s", resume_from_run_dir)
+            else:
+                planner_prompt = _read_prompt(
+                    subagents["planner"],
+                    task,
+                    active_repo_path,
+                    project_context=formatted_project_context,
+                    project_memory=formatted_project_memory,
+                    request_memory_update=memory_config.enabled and plan_only,
+                )
+                _write_markdown(run_dir / "planner_prompt.md", planner_prompt)
+                planner_output = _run_phase(
+                    phase="planner",
+                    prompt=planner_prompt,
+                    task=task,
+                    repo_path=active_repo_path,
+                    agent=selected_agent,
+                    backend=selected_backend,
+                    subagent=subagents["planner"],
+                    max_budget_usd=float(max_budget) if max_budget is not None else None,
+                    blocked_commands=blocked_commands,
+                    timeout_seconds=phase_timeout_seconds,
+                    stream=stream,
+                    run_dir=run_dir,
+                )
             _write_markdown(run_dir / "planner_output.md", planner_output)
 
             if plan_only:
@@ -771,7 +953,17 @@ def run_orchestrator(
                 details["next steps"] = "Review planner_output.md before allowing implementation."
                 details["memory"] = _record_memory_update(memory_config, planner_output)
                 status = "plan-only-complete"
+                _record_run_history(
+                    memory_config, task=task, status=status, fix_attempts=0, run_dir=run_dir
+                )
                 _finalize_git_details(details, active_repo_path)
+                _cleanup_worktree_if_requested(
+                    details=details,
+                    source_repo_path=resolved_repo_path,
+                    worktree_path=worktree_path,
+                    created_for_run=worktree_created,
+                    requested=delete_worktree_on_success,
+                )
                 report_path = write_report(run_dir, task, status, details)
                 return OrchestrationResult(
                     run_dir, report_path, status, active_repo_path, worktree_path
@@ -865,6 +1057,7 @@ def run_orchestrator(
                     formatted_project_context,
                     formatted_project_memory,
                     request_memory_update=memory_config.enabled,
+                    request_verdict=True,
                 ),
                 task=task,
                 repo_path=active_repo_path,
@@ -878,6 +1071,15 @@ def run_orchestrator(
                 run_dir=run_dir,
             )
             _write_markdown(run_dir / "reviewer_output.md", reviewer_output)
+            review_verdict = extract_verdict(reviewer_output)
+            if review_verdict is not None:
+                (run_dir / VERDICT_FILE_NAME).write_text(
+                    review_verdict.to_json() + "\n", encoding="utf-8"
+                )
+                details["review verdict"] = review_verdict.verdict
+                details["review findings"] = len(review_verdict.findings)
+            else:
+                details["review verdict"] = "not provided"
 
             status_lines = [line for line in get_git_status(active_repo_path).splitlines() if line]
             details["verification"] = "passed" if passed else "failed after fix limit"
@@ -891,12 +1093,42 @@ def run_orchestrator(
             )
             details["memory"] = _record_memory_update(memory_config, reviewer_output)
             status = "completed" if passed else "verification-failed"
+            _record_run_history(
+                memory_config, task=task, status=status, fix_attempts=fix_attempts, run_dir=run_dir
+            )
 
         _finalize_git_details(details, active_repo_path)
+        _cleanup_worktree_if_requested(
+            details=details,
+            source_repo_path=resolved_repo_path,
+            worktree_path=worktree_path,
+            created_for_run=worktree_created,
+            requested=delete_worktree_on_success
+            if status in {"completed", "plan-only-complete", "setup-complete"}
+            else delete_worktree_on_failure,
+        )
         report_path = write_report(run_dir, task, status, details)
-        return OrchestrationResult(run_dir, report_path, status, active_repo_path, worktree_path)
+        return OrchestrationResult(
+            run_dir,
+            report_path,
+            status,
+            active_repo_path,
+            worktree_path,
+            review_verdict=review_verdict,
+        )
     except Exception as error:
         details["failure"] = str(error)
+        if not dry_run and not setup_only:
+            _record_run_history(
+                memory_config, task=task, status="failed", fix_attempts=0, run_dir=run_dir
+            )
         _finalize_git_details(details, active_repo_path)
+        _cleanup_worktree_if_requested(
+            details=details,
+            source_repo_path=resolved_repo_path,
+            worktree_path=worktree_path,
+            created_for_run=worktree_created,
+            requested=delete_worktree_on_failure,
+        )
         write_report(run_dir, task, "failed", details)
         raise

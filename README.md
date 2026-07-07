@@ -7,7 +7,7 @@ task -> target validation -> optional worktree -> planner -> implementer
      -> verification -> fixer loop -> reviewer -> report
 ```
 
-It is designed to keep orchestration policy outside the target repository. It does not commit, push, delete branches, remove worktrees, or modify protected branches.
+It is designed to keep orchestration policy outside the target repository. It does not commit, push, delete branches, or modify protected branches. Worktree cleanup is opt-in and removes only clean worktrees created by the current run.
 
 ## Architecture
 
@@ -18,6 +18,9 @@ It is designed to keep orchestration policy outside the target repository. It do
 - `agent/hooks.py` provides deterministic pre/post command and phase guardrails.
 - `agent/subagents.py` loads named phase settings from YAML.
 - `agent/git_utils.py` creates local-only worktrees and rejects protected agent branch names.
+- `agent/queue.py` and `agent/queue_cli.py` provide the file-based task queue with parallel workers and retries.
+- `agent/review_gate.py` parses the reviewer's structured verdict block.
+- `agent/memory.py` handles accumulated project memory and the cross-run history log.
 
 ## Agents and backends
 
@@ -83,13 +86,19 @@ Blocked command substrings are configured in YAML. They are enforced in two plac
 
 Defaults block commits, pushes, W&B sweeps, notebook execution, destructive Docker teardown, and recursive deletion.
 
-`configs/subagents.default.yaml` defines the planner, implementer, fixer, and reviewer with their `allowed_tools`, optional `agent`, optional `backend`, and optional `permission_mode`. Claude phases are launched with `--allowedTools`, so planner and reviewer (no write tools) physically cannot edit, and implementer/fixer run with `permission_mode: acceptEdits` so the headless CLI can apply changes. Codex phases use the same mutability model to choose `read-only` vs `workspace-write` sandbox. A phase whose allowed tools include no write-capable tool (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Bash`) is treated as read-only.
+`configs/subagents.default.yaml` defines the planner, implementer, fixer, and reviewer with their `allowed_tools`, optional `agent`, optional `backend`, optional `permission_mode`, and optional `skills`. Claude phases are launched with `--allowedTools`, so planner and reviewer (no write tools) physically cannot edit, and implementer/fixer run with `permission_mode: acceptEdits` so the headless CLI can apply changes. Codex phases use the same mutability model to choose `read-only` vs `workspace-write` sandbox. A phase whose allowed tools include no write-capable tool (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Bash`) is treated as read-only.
 
-Each run records the resolved per-phase guardrails (agent, backend, read-only flag, permission mode, allowed/disallowed tools) in `runs/<timestamp>/phase_events.jsonl`.
+A target repository can customize phases without touching the orchestrator: an optional `.agent-loop/subagents.yaml` in the target repo is merged field-by-field over the defaults, so an entry may set only `skills` and inherit the rest. An overridden field *replaces* the default value (a `skills` list is not appended). The overlay is deliberately unprivileged: it may set only `description`, `prompt_template`, `max_turns`, and `skills`, and only for subagents the defaults define — it can never change `allowed_tools`, `permission_mode`, `agent`, or `backend`, so a target repository (or an agent-written branch) cannot widen its own permissions. It is also read from the source repository as launched, never from an agent worktree or branch. Relative `prompt_template` paths in the overlay resolve against the target repository; defaults keep resolving against the orchestrator. An explicit `--subagents-config` takes full control and skips the overlay. The resolved selection is recorded in the run report as `subagents source`.
+
+A phase may declare `skills` (`name` or `plugin:name`); an entry can also be a `{name, args}` mapping to request a skill mode (e.g. `{name: caveman:caveman, args: wenyan-ultra}`), passed through verbatim to the skill invocation. Skills are policy, not payload: with the Claude backend the CLI discovers skill content natively (target repository `.claude/skills/`, user scope, plugins), so the orchestrator only grants the `Skill` tool and appends a system-prompt instruction to invoke them. With the Codex backend, which has no skill loader, the repository-local `SKILL.md` body is inlined into the phase prompt; plugin-scoped skills are rejected there.
+
+Each run records the resolved per-phase guardrails (agent, backend, read-only flag, permission mode, allowed/disallowed tools, skills) in `runs/<timestamp>/phase_events.jsonl`.
 
 ## Worktree isolation
 
 Set `project.use_worktree` or pass `--use-worktree` to create a new local branch plus linked worktree. The agent branch cannot be `main`, `master`, `develop`, `production`, or `release/*`. Worktree creation fetches only, then uses `git worktree add -b`; it never pushes.
+
+Cleanup is disabled by default. Set `git.delete_worktree_on_success` or `git.delete_worktree_on_failure` to remove clean worktrees created by that run. Reused worktrees are never removed, and dirty worktrees are skipped instead of being force-deleted.
 
 ## In-place agent branch
 
@@ -182,7 +191,11 @@ Memory is stored in the main repository (not a throwaway worktree) so it persist
 memory:
   enabled: true                 # set false to disable injection and updates
   file: .agent-loop/memory.md   # path relative to the target repository root
+  history: true                 # record run outcomes and inject recent ones
+  history_file: .agent-loop/history.jsonl
 ```
+
+Alongside curated memory, the loop appends one JSON line per run to a history log (timestamp, task summary, status, fix attempts, run directory) and injects the most recent entries into the planner prompt as a "Recent Run History" section, so a new run knows how the last attempts on this repository went and can avoid repeating an approach that just failed.
 
 Memory is **knowledge the loop discovers** and rewrites. It is distinct from `config.yaml`, which is **human-authored policy** (verification commands, blocked commands, branch settings, source whitelists) that the loop enforces but never writes — keep guardrails there, not in memory. A repository-root `CLAUDE.md` is optional and complementary: it is auto-loaded by every interactive `claude` session in the repo (which the loop's prompt injection does not reach), so keep it lean and have it point to `.agent-loop/memory.md`.
 
@@ -384,6 +397,59 @@ task: |
   Improve action tab chip rendering while preserving behavior.
 ```
 
+## Task queue
+
+For batches of tasks, a file-based queue lives under `tasks/queue/` (gitignored) with four state directories: `queued/`, `running/`, `done/`, and `failed/`. A queue task file is a normal run file plus queue metadata. Every *queued* copy must carry an explicit `repo_path` so workers can run from anywhere — but your source task file may omit it: `queue_cli add` stamps the directory you launch it from into the queued copy (mirroring run-file cwd semantics) and never modifies the source file. Recommended layout: keep task files target-local (`<target>/.agent-loop/tasks/`), keep the queue central in the orchestrator, and enqueue from inside the target repository:
+
+```bash
+cd <target-repo>
+<orchestrator>/.venv/Scripts/python.exe -m agent.queue_cli \
+  --queue-dir <orchestrator>/tasks/queue add .agent-loop/tasks/my-task.yaml
+```
+
+Task file fields:
+
+```yaml
+repo_path: ../external/GM-Board   # optional in the source file; stamped from cwd by `add`
+task: Fix the flaky character-sheet test.
+use_worktree: true
+base_branch: main
+agent_branch: agent/fix-character-sheet
+priority: 5                          # higher runs first (default 0)
+max_retries: 2                       # re-attempts after a crash (default 1)
+retry_on_verification_failure: true  # also retry when verification fails
+retry_on_review_revise: true         # auto-requeue a revision pass on a revise verdict
+max_review_cycles: 1                 # bound on revise-triggered passes (default 1)
+```
+
+Manage it with the queue CLI:
+
+```bash
+python -m agent.queue_cli add tasks/my-task.yaml       # validate + enqueue
+python -m agent.queue_cli add tasks/my-task.yaml --retry-on-review-revise --retry-on-verification-failure
+python -m agent.queue_cli list                         # show queue states
+python -m agent.queue_cli run --workers 2 --max-tasks 10 --max-minutes 120
+```
+
+Queue metadata can live in the YAML task file, or be stamped only into the
+queued copy with `queue_cli add` flags such as `--retry-on-review-revise`,
+`--max-review-cycles`, `--retry-on-verification-failure`, and `--max-retries`.
+Prefer flags when a target-local task file should also remain usable with
+`agent.main --run-file`, because direct run files reject queue-only fields.
+
+Semantics:
+
+- **Claiming** uses an exclusive `.claim` marker (`O_CREAT | O_EXCL`) before moving a task to `running/`, because a bare rename is not a reliable mutex on Windows (`MoveFileExW` renames by handle, so two racing renames can both report success). Multiple workers — threads or separate processes — can safely share one queue.
+- **Parallelism**: with `--workers` above 1, every task must run in an isolated worktree (`use_worktree: true` or `branch_mode: worktree`); tasks without isolation are failed with a validation error instead of letting two agents edit the same working tree.
+- **Retries** re-enqueue a crashed task with an exponential-backoff `not_before` timestamp. When the failed attempt already produced a plan, the retry records `resume_from` and skips the planner phase, reusing `planner_output.md` from the failed run. `retry_on_verification_failure: true` extends this to runs whose verification never passed.
+- **Aggregate limits**: `--max-tasks` bounds how many attempts one `run` invocation claims; `--max-minutes` bounds its wall-clock time — the safety rails for an unattended session.
+- **Results**: each finished task gets a `<name>.result.json` sidecar in `done/` or `failed/` with status, run directory, report path, attempt count, and the reviewer verdict when one was emitted.
+- **Review gate**: with `retry_on_review_revise: true`, a run that passes verification but receives a `revise` verdict is re-enqueued immediately (no backoff — nothing crashed) for a revision pass: it resumes from the completed run's plan, and the reviewer's findings are appended to the task text as a "Reviewer Findings to Address" section. Cycles are bounded by `max_review_cycles` and counted separately from crash retries. A `reject` verdict moves the task to `failed/` even when verification passed: landing it would contradict the reviewer, so a human decides.
+
+## Review verdict
+
+The reviewer phase is asked to end with a fenced ` ```verdict ``` ` block containing `{"verdict": "approve" | "revise" | "reject", "findings": [...]}`. The orchestrator parses it deterministically, saves `review_verdict.json` in the run directory, records the verdict in the report, and exposes it on the run result so automation (like the queue) can branch on the review outcome without re-reading prose. A missing or malformed block degrades to "not provided" and never fails the run.
+
 ## Safety notes
 
 - Do not use this tool to bypass target-repository policy.
@@ -408,5 +474,4 @@ When using the repository virtual environment on Windows:
 
 ## Roadmap
 
-1. Add configurable review gates before verification and branch handoff.
-2. Add optional cleanup policies that require explicit user confirmation.
+1. Add optional cleanup policies that require explicit user confirmation.

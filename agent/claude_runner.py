@@ -34,17 +34,20 @@ def _build_claude_command(
     permission_mode: str | None,
     output_format: str | None,
     max_budget_usd: float | None,
+    append_system_prompt: str | None = None,
 ) -> list[str]:
     """Build a Claude print-mode command. The prompt is passed via stdin.
 
     Keeping the prompt off ``argv`` avoids the Windows command-line length limit
     (``WinError 206``) for large prompts (e.g. an implementer prompt carrying the
-    full planner output and project memory). Tool lists are passed as a single
-    comma-separated value (the CLI accepts a comma- or space-separated list). The
-    agent's tool policy is enforced here so read-only phases cannot edit and
-    blocked commands are denied; this is no longer left to prompt convention.
-    ``stream-json`` output additionally requires ``--verbose`` in print mode, so
-    it is added automatically.
+    full planner output and project memory). ``append_system_prompt`` stays on
+    ``argv`` because it carries only a short policy line (e.g. required skills),
+    never task content. Tool lists are passed as a single comma-separated value
+    (the CLI accepts a comma- or space-separated list). The agent's tool policy
+    is enforced here so read-only phases cannot edit and blocked commands are
+    denied; this is no longer left to prompt convention. ``stream-json`` output
+    additionally requires ``--verbose`` in print mode, so it is added
+    automatically.
     """
     command = ["claude", "-p"]
     if allowed_tools:
@@ -53,6 +56,8 @@ def _build_claude_command(
         command.extend(["--disallowedTools", ",".join(disallowed_tools)])
     if permission_mode is not None:
         command.extend(["--permission-mode", permission_mode])
+    if append_system_prompt:
+        command.extend(["--append-system-prompt", append_system_prompt])
     if output_format is not None:
         command.extend(["--output-format", output_format])
         if output_format == "stream-json":
@@ -255,6 +260,7 @@ def run_claude_prompt(
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     stream: bool = True,
     phase: str | None = None,
+    append_system_prompt: str | None = None,
 ) -> str:
     """Run ``claude -p`` in *repo_path* and return its result text.
 
@@ -278,6 +284,7 @@ def run_claude_prompt(
         permission_mode=permission_mode,
         output_format="stream-json" if stream else "text",
         max_budget_usd=max_budget_usd,
+        append_system_prompt=append_system_prompt,
     )
     runner = _run_streaming if stream else _run_captured
     return runner(command, prompt, resolved_repo_path, timeout_seconds, phase)

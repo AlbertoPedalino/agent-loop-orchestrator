@@ -46,6 +46,38 @@ def test_create_worktree_uses_git_c_and_safe_arguments(
     assert commands == [("worktree", "add", "-b", "agent/test", str(worktree), "base")]
 
 
+def test_remove_worktree_uses_git_c_and_safe_arguments(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo = tmp_path / "repo"
+    worktree = tmp_path / "worktrees" / "agent-test"
+    repo.mkdir()
+    worktree.mkdir(parents=True)
+    commands: list[tuple[str, ...]] = []
+    monkeypatch.setattr(git_utils, "ensure_git_repo", lambda path: True)
+
+    def fake_run(path: Path, *arguments: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
+        commands.append(arguments)
+        return subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
+
+    monkeypatch.setattr(git_utils, "_run_git", fake_run)
+
+    git_utils.remove_worktree(repo, worktree)
+
+    assert commands == [("worktree", "remove", str(worktree.resolve()))]
+
+
+def test_remove_worktree_refuses_source_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(git_utils, "ensure_git_repo", lambda path: True)
+
+    with pytest.raises(ValueError, match="source repository"):
+        git_utils.remove_worktree(repo, repo)
+
+
 def test_find_worktree_for_branch_parses_porcelain(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
