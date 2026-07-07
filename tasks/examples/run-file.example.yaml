@@ -73,16 +73,31 @@ setup_only: false                 # true = prepare branch/worktree, no agent
 dry_run: false                    # true = write run metadata only; never calls
                                   # an agent or runs verification
 
-# --- Queue metadata (NOT valid here) ----------------------------------------
+# --- Queue metadata ---------------------------------------------------------
 # id, depends_on, priority, max_retries, retry_on_verification_failure,
-# retry_on_review_revise, and max_review_cycles are QUEUE-ONLY fields:
-# agent.main --run-file rejects them. To keep this file usable both directly
-# and in the queue, stamp them at enqueue time instead:
+# retry_on_review_revise, and max_review_cycles are QUEUE-ONLY fields.
+#
+# If this YAML must remain usable directly with agent.main --run-file, leave
+# those fields out and stamp them only into the queued copy:
 #
 #   python -m agent.queue_cli add .agent-loop/tasks/<task>.yaml \
 #     --id sync-combat-sheet-hp \
 #     --depends-on import-character-projection \
 #     --max-retries 2 --retry-on-review-revise --max-review-cycles 1
+#
+# If this YAML is meant only for the queue, put the metadata directly in the
+# file instead and keep the enqueue command uniform:
+#
+#   id: sync-combat-sheet-hp
+#   depends_on:
+#     - import-character-projection
+#   max_retries: 2
+#   retry_on_review_revise: true
+#   max_review_cycles: 1
+#
+# Then enqueue with:
+#
+#   python -m agent.queue_cli add .agent-loop/tasks/<task>.yaml
 
 # --- Task -------------------------------------------------------------------
 # Structure that works well in practice: Goal, pointers into project memory,

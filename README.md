@@ -463,12 +463,14 @@ python -m agent.queue_cli list                         # show queue states
 python -m agent.queue_cli run --workers 2 --max-tasks 10 --max-minutes 120
 ```
 
-Queue metadata can live in the YAML task file, or be stamped only into the
-queued copy with `queue_cli add` flags such as `--retry-on-review-revise`,
-`--max-review-cycles`, `--retry-on-verification-failure`, `--max-retries`,
-`--id`, and repeatable `--depends-on`.
-Prefer flags when a target-local task file should also remain usable with
-`agent.main --run-file`, because direct run files reject queue-only fields.
+Queue metadata can live directly in the YAML task file when that file is meant
+only for the queue, so every enqueue uses the same `queue_cli add <file>`
+command. The same metadata can also be stamped only into the queued copy with
+`queue_cli add` flags such as `--retry-on-review-revise`, `--max-review-cycles`,
+`--retry-on-verification-failure`, `--max-retries`, `--id`, and repeatable
+`--depends-on`. Prefer flags when a target-local task file should also remain
+usable with `agent.main --run-file`, because direct run files reject queue-only
+fields.
 
 Semantics:
 
