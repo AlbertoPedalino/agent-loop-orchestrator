@@ -14,7 +14,7 @@ It is designed to keep orchestration policy outside the target repository. It do
 Install with [pipx](https://pipx.pypa.io) to get the `agent-loop` and `agent-queue` commands on your PATH, usable from any directory:
 
 ```bash
-pipx install git+https://github.com/<owner>/agent-loop-orchestrator
+pipx install git+https://github.com/AlbertoPedalino/agent-loop-orchestrator
 # or, from a local clone:
 pipx install /path/to/agent-loop-orchestrator
 ```
@@ -37,11 +37,17 @@ For development, a plain editable install inside a venv provides the same comman
 - `agent/claude_runner.py` runs Claude Code safely as `claude -p <prompt>` with an argument list and no shell.
 - `agent/codex_runner.py` runs Codex safely as `codex exec`, sends the prompt on stdin, and reads the final answer from `--output-last-message`.
 - `agent/hooks.py` provides deterministic pre/post command and phase guardrails.
+- `agent/policies.py` implements the blocked-command checks that keep runs bounded.
+- `agent/permissions.py` resolves provider-agnostic per-phase tool permissions (allow/deny lists, sandbox mode).
+- `agent/verifier.py` runs the configured verification commands under policy checks.
 - `agent/subagents.py` loads named phase settings from YAML.
+- `agent/skills.py` resolves per-phase skill policy (granted natively to Claude, inlined for Codex).
+- `agent/run_file.py` parses and validates YAML run files.
 - `agent/git_utils.py` creates local-only worktrees and rejects protected agent branch names.
 - `agent/queue.py` and `agent/queue_cli.py` provide the file-based task queue with parallel workers and retries.
 - `agent/review_gate.py` parses the reviewer's structured verdict block.
 - `agent/memory.py` handles accumulated project memory and the cross-run history log.
+- `agent/report.py` writes the Markdown run report.
 
 ## Agents and backends
 
@@ -68,11 +74,7 @@ python -m agent.main --repo-path . --task "test task" --agent codex
 - `cli` - Claude Code CLI for `agent: claude`, Codex CLI for `agent: codex`.
 
 The orchestrator does not use API clients or SDK backends. It invokes the local
-CLIs you have authenticated with your subscription plan:
-
-```bash
-python -m pip install -e ".[dev]"
-```
+CLIs you have authenticated with your subscription plan.
 
 Target-local config can choose the default provider:
 
@@ -154,9 +156,9 @@ Protected-branch guard: write-capable phases (implementer, fixer) refuse to run 
 ### Recommended: analysis task (no branch)
 
 ```powershell
-cd C:\Users\alber\Documents\DND\GM-Board
+cd <target-repo>
 
-C:\Users\alber\Documents\dev\agent-loop-orchestrator\.venv\Scripts\python.exe -m agent.main `
+<orchestrator>\.venv\Scripts\python.exe -m agent.main `
   --run-file .agent-loop\tasks\inspect-character-builder.yaml
 ```
 
@@ -178,9 +180,9 @@ With `plan_only: true` and `create_branch: auto` no branch is created or checked
 ### Recommended: implementation task (in-place agent branch)
 
 ```powershell
-cd C:\Users\alber\Documents\DND\GM-Board
+cd <target-repo>
 
-C:\Users\alber\Documents\dev\agent-loop-orchestrator\.venv\Scripts\python.exe -m agent.main `
+<orchestrator>\.venv\Scripts\python.exe -m agent.main `
   --run-file .agent-loop\tasks\improve-action-chips.yaml
 ```
 
@@ -326,9 +328,9 @@ GM-Board/
 ```
 
 ```powershell
-cd C:\Users\alber\Documents\dev\external\GM-Board
+cd <target-repo>
 
-C:\Users\alber\Documents\dev\agent-loop-orchestrator\.venv\Scripts\python.exe -m agent.main `
+<orchestrator>\.venv\Scripts\python.exe -m agent.main `
   --run-file .agent-loop\tasks\inspect-character-builder.yaml
 ```
 
@@ -479,7 +481,7 @@ The reviewer phase is asked to end with a fenced ` ```verdict ``` ` block contai
 - Review all proposed changes and reports before committing.
 - Do not enable real Claude or Codex execution in automated tests.
 - The orchestrator never performs `git commit` or `git push`.
-- Worktrees are never removed automatically in this version.
+- Worktree cleanup is opt-in (`git.delete_worktree_on_success` / `git.delete_worktree_on_failure`) and removes only clean worktrees created by the current run; reused or dirty worktrees are never removed.
 
 ## Development
 
@@ -494,7 +496,3 @@ When using the repository virtual environment on Windows:
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
 ```
-
-## Roadmap
-
-1. Add optional cleanup policies that require explicit user confirmation.
