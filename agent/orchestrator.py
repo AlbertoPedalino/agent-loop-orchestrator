@@ -50,7 +50,16 @@ from agent.review_gate import (
     ReviewVerdict,
     extract_verdict,
 )
-from agent.subagents import SubagentConfig, load_subagents_config
+from agent.skills import (
+    allowed_tools_with_skill,
+    format_skills_system_prompt,
+    inline_skills_for_codex,
+)
+from agent.subagents import (
+    SubagentConfig,
+    load_subagents_config,
+    load_subagents_with_target_overlay,
+)
 from agent.verifier import run_verification_commands, verification_passed
 
 
@@ -293,9 +302,24 @@ def _run_phase(
     Read-only phases (no write-capable tools) may run on a protected branch
     because their tool policy prevents any modification. Write-capable phases are
     refused on a protected branch and must never leave the repository on one.
+
+    Declared skills are policy, not payload: for the Claude backend the CLI
+    discovers skill content natively, so the phase only gains the ``Skill`` tool
+    plus a system-prompt instruction to invoke them. Codex has no skill loader,
+    so repository-local skill bodies are inlined into the prompt instead.
     """
+    selected_agent = subagent.agent or agent
+    selected_backend = subagent.backend or backend
+    phase_allowed_tools = subagent.allowed_tools
+    skills_system_prompt: str | None = None
+    if subagent.skills:
+        if selected_agent == "claude":
+            phase_allowed_tools = allowed_tools_with_skill(phase_allowed_tools)
+            skills_system_prompt = format_skills_system_prompt(subagent.skills)
+        else:
+            prompt = inline_skills_for_codex(prompt, subagent.skills, repo_path)
     permissions = resolve_phase_permissions(
-        subagent.allowed_tools, subagent.permission_mode, blocked_commands or []
+        phase_allowed_tools, subagent.permission_mode, blocked_commands or []
     )
     current_branch = get_current_branch(repo_path)
     if not subagent.is_read_only and is_protected_branch(current_branch):
@@ -304,15 +328,14 @@ def _run_phase(
             f"'{current_branch}'. Use an isolated agent worktree or in-place agent branch."
         )
     pre_metadata = pre_phase_hook(phase, repo_path, task)
-    selected_agent = subagent.agent or agent
-    selected_backend = subagent.backend or backend
     logger.info(
-        "▶ %s starting (agent=%s, backend=%s, %s, tools=%s)",
+        "▶ %s starting (agent=%s, backend=%s, %s, tools=%s, skills=%s)",
         phase,
         selected_agent,
         selected_backend,
         "read-only" if subagent.is_read_only else f"write/{permissions.permission_mode or 'default'}",
         ",".join(permissions.allowed_tools) or "none",
+        ",".join(subagent.skills) or "none",
     )
     started_at = time.monotonic()
     if selected_agent == "claude" and selected_backend == "cli":
@@ -326,6 +349,7 @@ def _run_phase(
             timeout_seconds=timeout_seconds,
             stream=stream,
             phase=phase,
+            append_system_prompt=skills_system_prompt,
         )
     elif selected_agent == "codex" and selected_backend == "cli":
         output = run_codex_prompt(
@@ -365,6 +389,7 @@ def _run_phase(
             "permission_mode": permissions.permission_mode or "default",
             "allowed_tools": permissions.allowed_tools,
             "disallowed_tools": permissions.disallowed_tools,
+            "skills": subagent.skills,
         },
     )
     return output
@@ -682,8 +707,15 @@ def run_orchestrator(
     if not isinstance(phase_timeout_seconds, int) or phase_timeout_seconds <= 0:
         raise ValueError("limits.phase_timeout_seconds must be a positive integer")
 
-    subagents_path = subagents_config_path or project_root / "configs" / "subagents.default.yaml"
-    subagents = load_subagents_config(subagents_path)
+    if subagents_config_path is not None:
+        # An explicit file is full control: the target overlay does not apply.
+        subagents = load_subagents_config(subagents_config_path)
+        subagents_source = f"explicit --subagents-config ({subagents_config_path})"
+    else:
+        subagents, subagents_source = load_subagents_with_target_overlay(
+            project_root / "configs" / "subagents.default.yaml", resolved_repo_path
+        )
+    logger.info("Subagents: %s", subagents_source)
     required_subagents = ("planner", "implementer", "fixer", "reviewer")
     missing_subagents = [name for name in required_subagents if name not in subagents]
     if missing_subagents:
@@ -794,6 +826,7 @@ def run_orchestrator(
         "repo path source": repo_path_source,
         "config path": str(resolved_config_path),
         "config source": config_source,
+        "subagents source": subagents_source,
         "target repository": str(active_repo_path),
         "branch mode": selected_branch_mode,
         "create branch mode": selected_create_branch,

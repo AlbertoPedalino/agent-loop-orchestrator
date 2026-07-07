@@ -40,6 +40,26 @@ def test_build_command_never_carries_prompt_on_argv() -> None:
     assert command == ["claude", "-p"]
 
 
+def test_build_command_appends_system_prompt_when_supplied() -> None:
+    command = _build_claude_command(
+        allowed_tools=["Read", "Skill"],
+        disallowed_tools=None,
+        permission_mode=None,
+        output_format=None,
+        max_budget_usd=None,
+        append_system_prompt="Required skills for this phase: `frontend-design`.",
+    )
+
+    assert command == [
+        "claude",
+        "-p",
+        "--allowedTools",
+        "Read,Skill",
+        "--append-system-prompt",
+        "Required skills for this phase: `frontend-design`.",
+    ]
+
+
 def test_build_command_never_passes_max_turns() -> None:
     command = _build_claude_command(
         allowed_tools=None,

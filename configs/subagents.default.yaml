@@ -11,6 +11,13 @@ subagents:
 
   implementer:
     description: "Code editing agent."
+    # Optional per-phase skills ('name' or 'plugin:name'). With the claude
+    # backend the CLI loads skill content natively from the target repository
+    # (.claude/skills/), user scope, or plugins; the orchestrator grants the
+    # Skill tool and instructs the phase to invoke them. With the codex backend
+    # the repository-local SKILL.md body is inlined into the prompt instead.
+    # skills:
+    #   - frontend-design
     allowed_tools:
       - Read
       - Edit
