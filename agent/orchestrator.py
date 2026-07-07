@@ -373,11 +373,17 @@ def _run_phase(
             repo_path,
             {"phase": phase, "agent": selected_agent, "backend": selected_backend},
         )
-        if max_budget_usd is not None and selected_agent == "codex":
-            raise ValueError(
-                f"limits.max_budget_usd is supported only for Claude phases; "
-                f"phase '{phase}' selected agent 'codex'."
-            )
+        if max_budget_usd is not None:
+            if selected_backend != "api":
+                raise ValueError(
+                    f"limits.max_budget_usd requires backend 'api'; "
+                    f"phase '{phase}' selected backend '{selected_backend}'."
+                )
+            if selected_agent != "claude":
+                raise ValueError(
+                    f"limits.max_budget_usd is supported only for Claude phases; "
+                    f"phase '{phase}' selected agent '{selected_agent}'."
+                )
         if selected_agent == "claude" and selected_backend in VALID_BACKENDS:
             output = run_claude_prompt(
                 prompt,

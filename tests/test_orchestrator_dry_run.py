@@ -767,6 +767,33 @@ def test_api_claude_phase_receives_max_budget(
     assert captured["max_budget_usd"] == 1.25
 
 
+def test_claude_phase_rejects_max_budget_with_cli_backend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    subagent = SubagentConfig(
+        "planner", "plan", ["Read", "Grep", "Glob"], 1, PROJECT_ROOT / "prompts" / "planner.md"
+    )
+    monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "main")
+    monkeypatch.setattr(
+        orchestrator,
+        "run_claude_prompt",
+        lambda *args, **kwargs: pytest.fail("Claude runner must not receive CLI max budget"),
+    )
+
+    with pytest.raises(ValueError, match="selected backend 'cli'"):
+        orchestrator._run_phase(
+            phase="planner",
+            prompt="plan",
+            task="task",
+            repo_path=tmp_path,
+            agent="claude",
+            backend="cli",
+            subagent=subagent,
+            max_budget_usd=1.25,
+            blocked_commands=["git push"],
+        )
+
+
 def test_codex_phase_rejects_max_budget_before_runner(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
