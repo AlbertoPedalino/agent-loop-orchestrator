@@ -373,7 +373,18 @@ def _run_phase(
             repo_path,
             {"phase": phase, "agent": selected_agent, "backend": selected_backend},
         )
-        if selected_agent == "claude" and selected_backend == "cli":
+        if max_budget_usd is not None:
+            if selected_backend != "api":
+                raise ValueError(
+                    f"limits.max_budget_usd requires backend 'api'; "
+                    f"phase '{phase}' selected backend '{selected_backend}'."
+                )
+            if selected_agent != "claude":
+                raise ValueError(
+                    f"limits.max_budget_usd is supported only for Claude phases; "
+                    f"phase '{phase}' selected agent '{selected_agent}'."
+                )
+        if selected_agent == "claude" and selected_backend in VALID_BACKENDS:
             output = run_claude_prompt(
                 prompt,
                 repo_path,
@@ -385,8 +396,9 @@ def _run_phase(
                 stream=stream,
                 phase=phase,
                 append_system_prompt=skills_system_prompt,
+                backend=selected_backend,
             )
-        elif selected_agent == "codex" and selected_backend == "cli":
+        elif selected_agent == "codex" and selected_backend in VALID_BACKENDS:
             output = run_codex_prompt(
                 prompt,
                 repo_path,
@@ -397,9 +409,8 @@ def _run_phase(
                 timeout_seconds=timeout_seconds,
                 stream=stream,
                 phase=phase,
+                backend=selected_backend,
             )
-        elif selected_agent == "codex":
-            raise ValueError("Codex agent supports only backend 'cli'")
         else:
             raise ValueError(f"Unsupported agent/backend: {selected_agent}/{selected_backend}")
         logger.info(
@@ -692,7 +703,7 @@ def run_orchestrator(
         raise ValueError("Agent must be 'claude' or 'codex'")
     selected_backend = backend or backend_config.get("type", "cli")
     if selected_backend not in VALID_BACKENDS:
-        raise ValueError("Backend must be 'cli'")
+        raise ValueError("Backend must be 'cli' (subscription) or 'api' (API-key billing)")
     selected_remote = remote or git_config.get("remote", "origin")
     if not isinstance(selected_remote, str) or not selected_remote.strip():
         raise ValueError("Git remote must be a non-empty string")
@@ -763,7 +774,13 @@ def run_orchestrator(
     if max_budget is not None and not isinstance(max_budget, (int, float)):
         raise ValueError("limits.max_budget_usd must be numeric")
     if max_budget is not None:
-        raise ValueError("limits.max_budget_usd is not supported in subscription CLI mode")
+        if selected_backend == "cli":
+            raise ValueError(
+                "limits.max_budget_usd requires backend 'api'; it is not supported "
+                "in subscription CLI mode"
+            )
+        if selected_agent == "codex":
+            raise ValueError("limits.max_budget_usd is supported only for agent 'claude'")
     max_changed_files = limits.get("max_changed_files", 8)
     if not isinstance(max_changed_files, int) or max_changed_files <= 0:
         raise ValueError("limits.max_changed_files must be a positive integer")

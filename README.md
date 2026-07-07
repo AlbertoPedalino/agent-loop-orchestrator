@@ -69,12 +69,15 @@ python -m agent.main --repo-path . --task "test task" --agent codex
 - `claude` - Claude Code.
 - `codex` - Codex CLI through `codex exec`.
 
-`backend` is kept for run-file compatibility and is always local CLI execution:
+`backend` chooses how that local CLI authenticates:
 
-- `cli` - Claude Code CLI for `agent: claude`, Codex CLI for `agent: codex`.
+- `cli` - subscription-authenticated CLI login. Provider API-key variables are stripped from the child process so a stray exported key cannot silently switch billing.
+- `api` - the same local CLI, but with an API key injected into the child process. Claude uses `ANTHROPIC_API_KEY`; Codex uses `OPENAI_API_KEY` and also receives `CODEX_API_KEY`.
 
-The orchestrator does not use API clients or SDK backends. It invokes the local
-CLIs you have authenticated with your subscription plan.
+The orchestrator still does not use SDK clients. API keys are resolved from the
+orchestrator process environment first, then from the orchestrator-root `.env`
+file; target repositories are not consulted for credentials. Copy
+`.env.example` to `.env` in this repository when you want local API-key billing.
 
 Target-local config can choose the default provider:
 
@@ -83,7 +86,7 @@ agent:
   provider: claude  # claude | codex
 
 backend:
-  type: cli         # local CLI only; no API/SDK backend
+  type: cli         # cli | api
 ```
 
 ## Terminal output
@@ -353,7 +356,7 @@ three sources it came from (`run_source.md` and `report.md`).
 repo_path: string | null # optional; defaults to --repo-path or the working dir
 config: string | null    # optional; omit to keep target-local config discovery
 agent: claude | codex    # defaults to claude
-backend: cli             # defaults to cli; local CLI only
+backend: cli | api       # defaults to cli; subscription CLI or API-key billing
 use_worktree: boolean    # defaults to false; true implies branch_mode: worktree
 branch_mode: worktree | in_place | none  # optional; see "In-place agent branch"
 create_branch: auto | always | never     # optional; defaults to auto
@@ -441,6 +444,8 @@ task: Fix the flaky character-sheet test.
 use_worktree: true
 base_branch: main
 agent_branch: agent/fix-character-sheet
+id: fix-character-sheet             # stable queue id; required when using depends_on
+depends_on: [prepare-test-fixtures]  # wait until these ids finish in done/
 priority: 5                          # higher runs first (default 0)
 max_retries: 2                       # re-attempts after a crash (default 1)
 retry_on_verification_failure: true  # also retry when verification fails
@@ -453,23 +458,29 @@ Manage it with the queue CLI:
 ```bash
 python -m agent.queue_cli add tasks/my-task.yaml       # validate + enqueue
 python -m agent.queue_cli add tasks/my-task.yaml --retry-on-review-revise --retry-on-verification-failure
+python -m agent.queue_cli add tasks/my-task.yaml --id fix-ui --depends-on setup-api
 python -m agent.queue_cli list                         # show queue states
 python -m agent.queue_cli run --workers 2 --max-tasks 10 --max-minutes 120
 ```
 
-Queue metadata can live in the YAML task file, or be stamped only into the
-queued copy with `queue_cli add` flags such as `--retry-on-review-revise`,
-`--max-review-cycles`, `--retry-on-verification-failure`, and `--max-retries`.
-Prefer flags when a target-local task file should also remain usable with
-`agent.main --run-file`, because direct run files reject queue-only fields.
+Queue metadata can live directly in the YAML task file when that file is meant
+only for the queue, so every enqueue uses the same `queue_cli add <file>`
+command. The same metadata can also be stamped only into the queued copy with
+`queue_cli add` flags such as `--retry-on-review-revise`, `--max-review-cycles`,
+`--retry-on-verification-failure`, `--max-retries`, `--id`, and repeatable
+`--depends-on`. Prefer flags when a target-local task file should also remain
+usable with `agent.main --run-file`, because direct run files reject queue-only
+fields.
 
 Semantics:
+
+- **Dependencies**: `depends_on` names stable queue `id` values. A dependent task stays in `queued/` until every dependency has a `done/` result. If a dependency is in `failed/`, the dependent task is moved to `failed/` with a `dependency-failed` sidecar. Missing dependencies stay queued and `list` reports them as waiting; duplicate ids and dependency cycles are failed explicitly so the queue does not wedge silently.
 
 - **Claiming** uses an exclusive `.claim` marker (`O_CREAT | O_EXCL`) before moving a task to `running/`, because a bare rename is not a reliable mutex on Windows (`MoveFileExW` renames by handle, so two racing renames can both report success). Multiple workers — threads or separate processes — can safely share one queue.
 - **Parallelism**: with `--workers` above 1, every task must run in an isolated worktree (`use_worktree: true` or `branch_mode: worktree`); tasks without isolation are failed with a validation error instead of letting two agents edit the same working tree.
 - **Retries** re-enqueue a crashed task with an exponential-backoff `not_before` timestamp. When the failed attempt already produced a plan, the retry records `resume_from` and skips the planner phase, reusing `planner_output.md` from the failed run. `retry_on_verification_failure: true` extends this to runs whose verification never passed.
 - **Aggregate limits**: `--max-tasks` bounds how many attempts one `run` invocation claims; `--max-minutes` bounds its wall-clock time — the safety rails for an unattended session.
-- **Results**: each finished task gets a `<name>.result.json` sidecar in `done/` or `failed/` with status, run directory, report path, attempt count, and the reviewer verdict when one was emitted.
+- **Results**: each finished task gets a `<name>.result.json` sidecar in `done/` or `failed/` with status, run directory, report path, attempt count, queue `id`/`depends_on` when present, and the reviewer verdict when one was emitted.
 - **Review gate**: with `retry_on_review_revise: true`, a run that passes verification but receives a `revise` verdict is re-enqueued immediately (no backoff — nothing crashed) for a revision pass: it resumes from the completed run's plan, and the reviewer's findings are appended to the task text as a "Reviewer Findings to Address" section. Cycles are bounded by `max_review_cycles` and counted separately from crash retries. A `reject` verdict moves the task to `failed/` even when verification passed: landing it would contradict the reviewer, so a human decides.
 
 ## Review verdict

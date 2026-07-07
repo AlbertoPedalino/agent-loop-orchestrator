@@ -111,6 +111,28 @@ def test_invalid_agent_fails_clearly(tmp_path: Path) -> None:
         load_subagents_config(config_path)
 
 
+def test_api_backend_is_valid_in_full_subagent_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "configs" / "api-backend.yaml"
+    config_path.parent.mkdir()
+    prompt_path = tmp_path / "prompts" / "planner.md"
+    prompt_path.parent.mkdir()
+    prompt_path.write_text("# Planner", encoding="utf-8")
+    config_path.write_text(
+        "subagents:\n"
+        "  planner:\n"
+        "    description: plan\n"
+        "    allowed_tools: [Read]\n"
+        "    max_turns: 2\n"
+        "    prompt_template: prompts/planner.md\n"
+        "    backend: api\n",
+        encoding="utf-8",
+    )
+
+    configs = load_subagents_config(config_path)
+
+    assert configs["planner"].backend == "api"
+
+
 DEFAULTS_PATH = PROJECT_ROOT / "configs" / "subagents.default.yaml"
 
 

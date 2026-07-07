@@ -6,7 +6,10 @@ agent:
   provider: claude        # claude | codex
 
 backend:
-  type: cli               # local CLI only; no API/SDK backend
+  type: cli               # cli = subscription-authenticated CLI
+                          # api = same local CLI billed via API key
+                          #       (ANTHROPIC_API_KEY / OPENAI_API_KEY from the
+                          #       environment or the orchestrator .env)
 
 git:
   remote: origin
@@ -24,7 +27,7 @@ limits:
   max_fix_attempts: 3
   max_changed_files: 8
   phase_timeout_seconds: 600   # per-phase CLI timeout
-  # max_budget_usd is intentionally unsupported in subscription CLI mode.
+  # max_budget_usd is supported only with backend: api and agent: claude.
   # Per-phase turn caps live in configs/subagents.default.yaml (max_turns).
 
 memory:

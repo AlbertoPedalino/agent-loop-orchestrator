@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import threading
 
+from agent.api_keys import subprocess_env
 from agent.log import get_logger
 from agent.permissions import is_read_only_tool_set
 
@@ -90,13 +91,49 @@ def _build_codex_command(
     return command
 
 
+def _is_windowsapps_alias(path: str) -> bool:
+    normalized = path.replace("/", "\\").lower()
+    return "\\appdata\\local\\microsoft\\windowsapps\\" in normalized
+
+
+def _well_known_powershell_paths() -> list[str]:
+    candidates: list[str] = []
+    program_files = os.environ.get("ProgramFiles")
+    if program_files:
+        candidates.append(str(Path(program_files) / "PowerShell" / "7" / "pwsh.exe"))
+    program_files_x86 = os.environ.get("ProgramFiles(x86)")
+    if program_files_x86:
+        candidates.append(str(Path(program_files_x86) / "PowerShell" / "7" / "pwsh.exe"))
+    system_root = os.environ.get("SystemRoot")
+    if system_root:
+        candidates.append(
+            str(Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+        )
+    return candidates
+
+
+def _resolve_powershell_executable() -> str | None:
+    for executable_name in ("pwsh", "pwsh.exe"):
+        found = shutil.which(executable_name)
+        if found is not None and not _is_windowsapps_alias(found):
+            return found
+    if os.name == "nt":
+        for candidate in _well_known_powershell_paths():
+            if candidate.lower().endswith("\\pwsh.exe") and Path(candidate).is_file():
+                return candidate
+    for executable_name in ("powershell", "powershell.exe"):
+        found = shutil.which(executable_name)
+        if found is not None and not _is_windowsapps_alias(found):
+            return found
+    if os.name == "nt":
+        for candidate in _well_known_powershell_paths():
+            if not candidate.lower().endswith("\\pwsh.exe") and Path(candidate).is_file():
+                return candidate
+    return None
+
+
 def _powershell_prefix_for_script(script_path: Path) -> list[str]:
-    powershell = (
-        shutil.which("pwsh")
-        or shutil.which("pwsh.exe")
-        or shutil.which("powershell")
-        or shutil.which("powershell.exe")
-    )
+    powershell = _resolve_powershell_executable()
     if powershell is None:
         raise CodexRunnerError(
             f"Codex CLI was found as PowerShell script {script_path}, "
@@ -229,6 +266,37 @@ def _handle_stream_line(line: str, phase: str | None, stdout_lines: list[str]) -
         logger.debug("[%s] %s", label, event_type)
 
 
+def _kill_process_tree(process: Any) -> None:
+    """Terminate the Codex wrapper and its child tree when the phase times out."""
+    poll = getattr(process, "poll", None)
+    try:
+        if callable(poll) and poll() is not None:
+            return
+    except OSError:
+        return
+
+    killed_tree = False
+    pid = getattr(process, "pid", None)
+    if os.name == "nt" and pid is not None:
+        try:
+            result = subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            killed_tree = result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            killed_tree = False
+
+    if not killed_tree:
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
 def _run_streaming(
     command: list[str],
     prompt: str,
@@ -236,6 +304,7 @@ def _run_streaming(
     output_path: Path,
     timeout_seconds: int,
     phase: str | None,
+    env: dict[str, str] | None = None,
 ) -> str:
     safe_command = _safe_command_display(command)
     prompt_path = output_path.with_name("prompt.md")
@@ -258,6 +327,7 @@ def _run_streaming(
             process = subprocess.Popen(
                 command,
                 cwd=cwd,
+                env=env,
                 stdin=prompt_file,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -277,13 +347,17 @@ def _run_streaming(
     timed_out = threading.Event()
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
+    wait_result: dict[str, int] = {}
+    wait_errors: list[str] = []
 
-    def _kill_on_timeout() -> None:
-        timed_out.set()
+    def _read_stdout() -> None:
+        if process.stdout is None:
+            return
         try:
-            process.kill()
-        except OSError:
-            pass
+            for line in process.stdout:
+                _handle_stream_line(line, phase, stdout_lines)
+        except OSError as error:
+            stdout_lines.append(f"<stdout read failed: {error}>")
 
     def _read_stderr() -> None:
         if process.stderr is None:
@@ -293,23 +367,43 @@ def _run_streaming(
         except OSError as error:
             stderr_lines.append(f"<stderr read failed: {error}>")
 
+    def _wait_for_process() -> None:
+        try:
+            wait_result["return_code"] = process.wait()
+        except OSError as error:
+            wait_errors.append(str(error))
+
+    stdout_thread = threading.Thread(target=_read_stdout, daemon=True)
     stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
-    watchdog = threading.Timer(timeout_seconds, _kill_on_timeout)
+    wait_thread = threading.Thread(target=_wait_for_process, daemon=True)
+    stdout_thread.start()
     stderr_thread.start()
-    watchdog.start()
-    try:
-        assert process.stdout is not None
-        for line in process.stdout:
-            _handle_stream_line(line, phase, stdout_lines)
-        return_code = process.wait()
-        stderr_thread.join(timeout=1)
-    finally:
-        watchdog.cancel()
+    wait_thread.start()
+
+    wait_thread.join(timeout=timeout_seconds)
+    if wait_thread.is_alive():
+        timed_out.set()
+        _kill_process_tree(process)
+        wait_thread.join(timeout=5)
+
+    stdout_thread.join(timeout=1)
+    stderr_thread.join(timeout=1)
 
     stderr = "".join(stderr_lines)
     if timed_out.is_set():
         raise CodexRunnerError(
             f"Codex phase '{_phase_label(phase)}' timed out after {timeout_seconds} seconds.\n"
+            f"Command: {safe_command}"
+        )
+    if wait_errors:
+        raise CodexRunnerError(
+            f"Codex phase '{_phase_label(phase)}' failed while waiting for the process: "
+            f"{wait_errors[0]}\nCommand: {safe_command}"
+        )
+    return_code = wait_result.get("return_code")
+    if return_code is None:
+        raise CodexRunnerError(
+            f"Codex phase '{_phase_label(phase)}' exited without a return code.\n"
             f"Command: {safe_command}"
         )
     if return_code != 0:
@@ -329,12 +423,14 @@ def _run_captured(
     output_path: Path,
     timeout_seconds: int,
     phase: str | None,
+    env: dict[str, str] | None = None,
 ) -> str:
     safe_command = _safe_command_display(command)
     try:
         result = subprocess.run(
             command,
             cwd=cwd,
+            env=env,
             input=prompt,
             capture_output=True,
             text=True,
@@ -373,11 +469,17 @@ def run_codex_prompt(
     stream: bool = True,
     phase: str | None = None,
     transient_retries: int = DEFAULT_TRANSIENT_RETRIES,
+    backend: str = "cli",
 ) -> str:
     """Run ``codex exec`` in *repo_path* and return its final message.
 
     A transient failure (a flaky OS sandbox spawn, not a prompt or code error) is
     retried up to ``transient_retries`` times before propagating.
+
+    *backend* selects how the CLI authenticates: ``cli`` (subscription login;
+    API-key variables are stripped from the subprocess environment) or ``api``
+    (an ``OPENAI_API_KEY``/``CODEX_API_KEY`` resolved from the environment or
+    the orchestrator ``.env`` is injected, so the run bills the API account).
     """
     if max_budget_usd is not None:
         raise ValueError("max_budget_usd is supported by Claude CLI, not by Codex CLI")
@@ -404,6 +506,7 @@ def run_codex_prompt(
             stream=stream,
             cli_prefix=_resolve_codex_command_prefix(),
         )
+        env = subprocess_env("codex", backend)
         runner = _run_streaming if stream else _run_captured
         for attempt in range(transient_retries + 1):
             try:
@@ -414,6 +517,7 @@ def run_codex_prompt(
                     output_path,
                     timeout_seconds,
                     phase,
+                    env,
                 )
             except CodexTransientError:
                 if attempt >= transient_retries:

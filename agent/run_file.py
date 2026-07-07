@@ -87,7 +87,8 @@ def load_run_file(path: Path) -> RunFileConfig:
     * either ``task`` or ``task_file`` is required, and they are mutually
       exclusive;
     * ``agent`` defaults to ``claude`` and must be ``claude`` or ``codex``;
-    * ``backend`` defaults to ``cli`` and must be ``cli``;
+    * ``backend`` defaults to ``cli`` and must be ``cli`` (subscription auth)
+      or ``api`` (API-key billing through the same local CLI);
     * boolean fields default to ``False``;
     * ``config`` is optional, so target-local config discovery still applies
       when it is omitted.
@@ -135,7 +136,7 @@ def parse_run_data(data: object) -> RunFileConfig:
 
     backend_value = data.get("backend", "cli")
     if backend_value not in VALID_BACKENDS:
-        raise ValueError("Run file 'backend' must be 'cli'")
+        raise ValueError("Run file 'backend' must be 'cli' or 'api'")
 
     booleans: dict[str, bool] = {}
     for field in _BOOLEAN_FIELDS:

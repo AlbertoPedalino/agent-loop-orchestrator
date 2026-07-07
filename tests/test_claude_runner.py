@@ -131,6 +131,46 @@ def test_captured_prompt_returns_stdout(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert captured["kwargs"]["timeout"] == 300
 
 
+def test_cli_backend_strips_anthropic_api_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "secret")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "subscription-token")
+    monkeypatch.setattr("agent.claude_runner.subprocess.run", fake_run)
+
+    assert run_claude_prompt("plan", tmp_path, stream=False) == "ok"
+
+    env = captured["kwargs"]["env"]
+    assert isinstance(env, dict)
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+
+
+def test_api_backend_injects_anthropic_api_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "api-key")
+    monkeypatch.setattr("agent.claude_runner.subprocess.run", fake_run)
+
+    assert run_claude_prompt("plan", tmp_path, stream=False, backend="api") == "ok"
+
+    env = captured["kwargs"]["env"]
+    assert isinstance(env, dict)
+    assert env["ANTHROPIC_API_KEY"] == "api-key"
+
+
 class _FakeStream:
     def __init__(self, lines: list[str]) -> None:
         self._lines = lines

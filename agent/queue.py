@@ -9,7 +9,7 @@ The queue is a directory with four state subdirectories::
       failed/    exhausted tasks plus the same sidecar
 
 A task file carries the exact same fields as a ``--run-file`` plus queue-only
-metadata (``priority``, retry/review flags, and retry/review limits);
+metadata (``id``, ``depends_on``, ``priority``, retry/review flags, and retry/review limits);
 ``attempts``, ``review_cycles``, ``not_before``, and ``resume_from`` are managed by the queue
 itself across retries/revisions. ``repo_path`` is required: a queued task must be
 self-contained because it does not inherit a working directory.
@@ -28,7 +28,7 @@ planner phase.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -67,6 +67,8 @@ _STATE_DIRS = ("queued", "running", "done", "failed")
 _QUEUE_ONLY_FIELDS = frozenset(
     {
         "priority",
+        "id",
+        "depends_on",
         "max_retries",
         "retry_on_verification_failure",
         "retry_on_review_revise",
@@ -92,6 +94,8 @@ class QueueTask:
     path: Path
     run: RunFileConfig
     raw: dict[str, Any]
+    task_id: str | None = None
+    depends_on: tuple[str, ...] = ()
     priority: int = 0
     max_retries: int = 1
     retry_on_verification_failure: bool = False
@@ -143,6 +147,34 @@ def _require_int(data: dict[str, Any], key: str, default: int, minimum: int) -> 
     return value
 
 
+def _optional_non_empty_string(data: dict[str, Any], key: str) -> str | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise QueueTaskError(f"Queue task '{key}' must be a non-empty string")
+    return value.strip()
+
+
+def _optional_string_list(data: dict[str, Any], key: str) -> tuple[str, ...]:
+    value = data.get(key)
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise QueueTaskError(f"Queue task '{key}' must be a list of non-empty strings")
+    items: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise QueueTaskError(f"Queue task '{key}' must be a list of non-empty strings")
+        normalized = item.strip()
+        if normalized in seen:
+            raise QueueTaskError(f"Queue task '{key}' contains duplicate id '{normalized}'")
+        seen.add(normalized)
+        items.append(normalized)
+    return tuple(items)
+
+
 def _load_task_data(path: Path) -> dict[str, Any]:
     """Read a task file into a mapping, normalizing load errors."""
     if not path.is_file():
@@ -173,6 +205,13 @@ def _parse_queue_data(data: dict[str, Any], resolved: Path) -> QueueTask:
     run = parse_run_data(run_data)
     if run.repo_path is None:
         raise QueueTaskError("Queue tasks must set 'repo_path' explicitly")
+
+    task_id = _optional_non_empty_string(queue_meta, "id")
+    depends_on = _optional_string_list(queue_meta, "depends_on")
+    if depends_on and task_id is None:
+        raise QueueTaskError("Queue task 'depends_on' requires queue task 'id'")
+    if task_id is not None and task_id in depends_on:
+        raise QueueTaskError("Queue task 'depends_on' cannot include its own id")
 
     priority = _require_int(queue_meta, "priority", 0, -1_000_000)
     max_retries = _require_int(queue_meta, "max_retries", 1, 0)
@@ -212,6 +251,8 @@ def _parse_queue_data(data: dict[str, Any], resolved: Path) -> QueueTask:
         path=resolved,
         run=run,
         raw=data,
+        task_id=task_id,
+        depends_on=depends_on,
         priority=priority,
         max_retries=max_retries,
         retry_on_verification_failure=retry_on_verification_failure,
@@ -234,6 +275,18 @@ def _unique_destination(directory: Path, name: str) -> Path:
         candidate = directory / f"{stem}-{counter}{suffix}"
         counter += 1
     return candidate
+
+
+def _rename_with_retry(source: Path, destination: Path) -> None:
+    """Rename a queue file, tolerating brief Windows reader locks."""
+    for attempt in range(5):
+        try:
+            os.rename(source, destination)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.02 * (attempt + 1))
 
 
 def enqueue(
@@ -287,6 +340,171 @@ def list_queue(queue_dir: Path) -> dict[str, list[str]]:
         state: sorted(path.name for path in dirs[state].glob("*.yaml"))
         for state in _STATE_DIRS
     }
+
+
+@dataclass(frozen=True)
+class _DependencySnapshot:
+    """Resolved task ids currently visible in queue state directories."""
+
+    done_ids: frozenset[str] = frozenset()
+    failed_ids: frozenset[str] = frozenset()
+    running_ids: frozenset[str] = frozenset()
+    queued_ids: frozenset[str] = frozenset()
+    duplicate_ids: frozenset[str] = frozenset()
+
+    @property
+    def known_ids(self) -> frozenset[str]:
+        return self.done_ids | self.failed_ids | self.running_ids | self.queued_ids
+
+
+def _dependency_snapshot(dirs: dict[str, Path]) -> _DependencySnapshot:
+    ids_by_state: dict[str, set[str]] = {state: set() for state in _STATE_DIRS}
+    locations: dict[str, list[tuple[str, Path]]] = {}
+    for state in _STATE_DIRS:
+        for path in dirs[state].glob("*.yaml"):
+            try:
+                task = parse_queue_task(path)
+            except (OSError, QueueTaskError, ValueError):
+                continue
+            if task.task_id is None:
+                continue
+            ids_by_state[state].add(task.task_id)
+            locations.setdefault(task.task_id, []).append((state, path))
+    duplicate_ids = {task_id for task_id, paths in locations.items() if len(paths) > 1}
+    return _DependencySnapshot(
+        done_ids=frozenset(ids_by_state["done"]),
+        failed_ids=frozenset(ids_by_state["failed"]),
+        running_ids=frozenset(ids_by_state["running"]),
+        queued_ids=frozenset(ids_by_state["queued"]),
+        duplicate_ids=frozenset(duplicate_ids),
+    )
+
+
+def _find_dependency_cycle_ids(
+    queued_tasks: list[QueueTask], snapshot: _DependencySnapshot
+) -> frozenset[str]:
+    graph: dict[str, set[str]] = {}
+    for task in queued_tasks:
+        if task.task_id is None or task.task_id in snapshot.duplicate_ids:
+            continue
+        graph[task.task_id] = {
+            dependency
+            for dependency in task.depends_on
+            if dependency in snapshot.queued_ids and dependency not in snapshot.duplicate_ids
+        }
+
+    states: dict[str, str] = {}
+    stack: list[str] = []
+    cycle_ids: set[str] = set()
+
+    def visit(task_id: str) -> None:
+        states[task_id] = "visiting"
+        stack.append(task_id)
+        for dependency in graph.get(task_id, set()):
+            dependency_state = states.get(dependency)
+            if dependency_state == "visiting":
+                cycle_ids.update(stack[stack.index(dependency):])
+            elif dependency_state is None:
+                visit(dependency)
+        stack.pop()
+        states[task_id] = "visited"
+
+    for task_id in graph:
+        if states.get(task_id) is None:
+            visit(task_id)
+    return frozenset(cycle_ids)
+
+
+def _dependency_failure_reason(
+    task: QueueTask, snapshot: _DependencySnapshot, cycle_ids: frozenset[str]
+) -> str | None:
+    if task.task_id is not None and task.task_id in snapshot.duplicate_ids:
+        return f"duplicate queue id '{task.task_id}'"
+    if task.task_id is not None and task.task_id in cycle_ids:
+        return f"dependency cycle involving id '{task.task_id}'"
+    for dependency in task.depends_on:
+        if dependency in snapshot.duplicate_ids:
+            return f"dependency id '{dependency}' is duplicated"
+        if dependency in snapshot.failed_ids:
+            return f"dependency '{dependency}' failed"
+    return None
+
+
+def _dependency_wait_summary(task: QueueTask, snapshot: _DependencySnapshot) -> str | None:
+    if not task.depends_on:
+        return None
+    missing: list[str] = []
+    queued: list[str] = []
+    running: list[str] = []
+    for dependency in task.depends_on:
+        if dependency in snapshot.done_ids:
+            continue
+        if dependency in snapshot.running_ids:
+            running.append(dependency)
+        elif dependency in snapshot.queued_ids:
+            queued.append(dependency)
+        elif dependency not in snapshot.failed_ids and dependency not in snapshot.duplicate_ids:
+            missing.append(dependency)
+    parts: list[str] = []
+    if queued:
+        parts.append("queued " + ", ".join(queued))
+    if running:
+        parts.append("running " + ", ".join(running))
+    if missing:
+        parts.append("missing " + ", ".join(missing))
+    return "; ".join(parts) if parts else None
+
+
+def list_queue_details(queue_dir: Path) -> dict[str, list[str]]:
+    """Return queue state entries with dependency wait reasons for queued tasks."""
+    dirs = queue_state_dirs(queue_dir)
+    snapshot = _dependency_snapshot(dirs)
+    queued_tasks: list[QueueTask] = []
+    for path in dirs["queued"].glob("*.yaml"):
+        try:
+            queued_tasks.append(parse_queue_task(path))
+        except (OSError, QueueTaskError, ValueError):
+            continue
+    cycle_ids = _find_dependency_cycle_ids(queued_tasks, snapshot)
+
+    details: dict[str, list[str]] = {}
+    for state in _STATE_DIRS:
+        entries: list[str] = []
+        for path in sorted(dirs[state].glob("*.yaml"), key=lambda item: item.name):
+            entry = path.name
+            if state == "queued":
+                try:
+                    task = parse_queue_task(path)
+                except (QueueTaskError, ValueError) as error:
+                    entry += f" (invalid: {error})"
+                except OSError:
+                    continue
+                else:
+                    failure = _dependency_failure_reason(task, snapshot, cycle_ids)
+                    waiting = _dependency_wait_summary(task, snapshot)
+                    if failure is not None:
+                        entry += f" (blocked: {failure})"
+                    elif waiting is not None:
+                        entry += f" (waiting: {waiting})"
+            entries.append(entry)
+        details[state] = entries
+    return details
+
+
+def _queue_should_keep_waiting(dirs: dict[str, Path]) -> bool:
+    """Return whether queued tasks may become ready without a new enqueue."""
+    snapshot = _dependency_snapshot(dirs)
+    now = datetime.now()
+    for path in dirs["queued"].glob("*.yaml"):
+        try:
+            task = parse_queue_task(path)
+        except (OSError, QueueTaskError, ValueError):
+            return True
+        if task.not_before is not None and task.not_before > now:
+            return True
+        if any(dependency in snapshot.running_ids for dependency in task.depends_on):
+            return True
+    return False
 
 
 def _claim_marker(path: Path) -> Path:
@@ -356,7 +574,25 @@ def claim_next(queue_dir: Path, now: datetime | None = None) -> QueueTask | None
             continue
         candidates.append((-task.priority, path.name, path, task, ""))
 
+    queued_tasks = [task for _, _, _, task, _ in candidates if task is not None]
+    needs_dependency_snapshot = any(
+        task.task_id is not None or task.depends_on for task in queued_tasks
+    )
+    snapshot = _dependency_snapshot(dirs) if needs_dependency_snapshot else _DependencySnapshot()
+    cycle_ids = _find_dependency_cycle_ids(queued_tasks, snapshot)
+
     for _, _, path, task, parse_error in sorted(candidates, key=lambda item: (item[0], item[1])):
+        if task is not None:
+            dependency_failure = _dependency_failure_reason(task, snapshot, cycle_ids)
+            if dependency_failure is not None:
+                if path.exists() and _try_claim(path):
+                    try:
+                        _fail_dependency_task(dirs, path, task, dependency_failure)
+                    finally:
+                        _release_claim(path)
+                continue
+            if _dependency_wait_summary(task, snapshot) is not None:
+                continue
         if not path.exists() or not _try_claim(path):
             continue
         try:
@@ -365,24 +601,10 @@ def claim_next(queue_dir: Path, now: datetime | None = None) -> QueueTask | None
                 continue
             destination = dirs["running"] / path.name
             try:
-                os.rename(path, destination)
+                _rename_with_retry(path, destination)
             except OSError:
                 continue  # vanished under us despite the claim; treat as lost
-            return QueueTask(
-                path=destination,
-                run=task.run,
-                raw=task.raw,
-                priority=task.priority,
-                max_retries=task.max_retries,
-                retry_on_verification_failure=task.retry_on_verification_failure,
-                retry_on_review_revise=task.retry_on_review_revise,
-                max_review_cycles=task.max_review_cycles,
-                review_cycles=task.review_cycles,
-                attempts=task.attempts,
-                not_before=task.not_before,
-                resume_from=task.resume_from,
-                findings_from=task.findings_from,
-            )
+            return replace(task, path=destination)
         finally:
             _release_claim(path)
     return None
@@ -392,13 +614,44 @@ def _fail_invalid_task(dirs: dict[str, Path], path: Path, error: str) -> None:
     """Move an unparseable, already-claimed task to ``failed/``."""
     destination = _unique_destination(dirs["failed"], path.name)
     try:
-        os.rename(path, destination)
+        _rename_with_retry(path, destination)
     except OSError:
         return
     _write_result_sidecar(
         destination, {"status": "invalid", "error": error, "attempts": 0}
     )
     logger.warning("Moved invalid queue task %s to failed/: %s", path.name, error)
+
+
+def _task_result_metadata(task: QueueTask) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    if task.task_id is not None:
+        metadata["id"] = task.task_id
+    if task.depends_on:
+        metadata["depends_on"] = list(task.depends_on)
+    return metadata
+
+
+def _fail_dependency_task(
+    dirs: dict[str, Path], path: Path, task: QueueTask, error: str
+) -> None:
+    """Move a dependency-impossible queued task to ``failed/``."""
+    destination = _unique_destination(dirs["failed"], path.name)
+    try:
+        _rename_with_retry(path, destination)
+    except OSError:
+        return
+    _write_result_sidecar(
+        destination,
+        {
+            **_task_result_metadata(task),
+            "status": "dependency-failed",
+            "error": error,
+            "dependency_error": error,
+            "attempts": task.attempts,
+        },
+    )
+    logger.warning("Moved dependency-blocked queue task %s to failed/: %s", path.name, error)
 
 
 def _write_result_sidecar(task_path: Path, result: dict[str, Any]) -> Path:
@@ -416,8 +669,11 @@ def finish_task(
         raise ValueError("outcome must be 'done' or 'failed'")
     dirs = queue_state_dirs(queue_dir)
     destination = _unique_destination(dirs[outcome], task.path.name)
-    os.rename(task.path, destination)
-    _write_result_sidecar(destination, {**result, "attempts": task.attempts + 1})
+    _rename_with_retry(task.path, destination)
+    _write_result_sidecar(
+        destination,
+        {**_task_result_metadata(task), **result, "attempts": task.attempts + 1},
+    )
     return destination
 
 
@@ -653,6 +909,10 @@ def _worker_loop(
             has_pending = any(dirs["queued"].glob("*.yaml"))
             if not busy and not has_pending:
                 return  # nothing left anywhere: queue drained
+            if not busy and not _queue_should_keep_waiting(dirs):
+                with state.lock:
+                    state.summary.stopped_reason = "blocked dependencies"
+                return
             # Deferred retries or another worker's task may still produce work.
             time.sleep(poll_seconds)
             continue

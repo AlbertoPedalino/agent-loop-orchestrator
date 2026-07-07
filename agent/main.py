@@ -69,7 +69,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--backend",
         choices=sorted(VALID_BACKENDS),
-        help="Override configured execution backend. Only local CLI execution is supported.",
+        help=(
+            "Override configured execution backend: 'cli' runs the provider CLI with its "
+            "subscription login; 'api' runs the same CLI billed via API key "
+            "(ANTHROPIC_API_KEY / OPENAI_API_KEY from the environment or the orchestrator .env)."
+        ),
     )
     parser.add_argument("--max-fix-attempts", type=int, help="Override limits.max_fix_attempts.")
     parser.add_argument("--dry-run", action="store_true", help="Write run metadata without target changes.")
