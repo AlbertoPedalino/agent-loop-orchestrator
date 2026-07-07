@@ -8,4 +8,5 @@ PLAN ONLY. Inspect the relevant files and repository context before proposing wo
 - Identify the likely implementation files and tests.
 - State assumptions, risks, and a minimal ordered plan.
 - Prefer targeted inspection over broad exploration.
+- Report tersely: no fluff, keep all technical substance.
 - End with the files you inspected and the tests that should be run.

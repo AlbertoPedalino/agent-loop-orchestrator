@@ -10,7 +10,7 @@ import yaml
 
 from agent.agent_options import VALID_AGENT_PROVIDERS, VALID_BACKENDS
 from agent.permissions import VALID_PERMISSION_MODES, is_read_only_tool_set
-from agent.skills import validate_skill_names
+from agent.skills import SkillRef, validate_skills
 
 
 # Optional per-target overlay, resolved inside the target repository. It merges
@@ -35,7 +35,7 @@ class SubagentConfig:
     agent: str | None = None
     backend: str | None = None
     permission_mode: str | None = None
-    skills: list[str] = field(default_factory=list)
+    skills: list[SkillRef] = field(default_factory=list)
 
     @property
     def is_read_only(self) -> bool:
@@ -102,7 +102,7 @@ def _parse_subagent_entry(name: str, entry: dict[str, Any]) -> SubagentConfig:
             f"Subagent '{name}' permission_mode must be one of: "
             f"{', '.join(sorted(VALID_PERMISSION_MODES))}"
         )
-    skills = validate_skill_names(entry.get("skills"), name)
+    skills = validate_skills(entry.get("skills"), name)
     prompt_path = Path(prompt_value).resolve()
     if not prompt_path.is_file():
         raise ValueError(f"Subagent '{name}' prompt template does not exist: {prompt_path}")

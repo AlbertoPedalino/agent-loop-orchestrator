@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from agent.skills import SkillRef
 from agent.subagents import load_subagents_config, load_subagents_with_target_overlay
 
 
@@ -48,7 +49,10 @@ def test_skills_are_parsed_and_validated(tmp_path: Path) -> None:
 
     configs = load_subagents_config(config_path)
 
-    assert configs["implementer"].skills == ["frontend-design", "caveman:caveman-review"]
+    assert configs["implementer"].skills == [
+        SkillRef("frontend-design"),
+        SkillRef("caveman:caveman-review"),
+    ]
 
 
 def test_invalid_skill_name_fails_clearly(tmp_path: Path) -> None:
@@ -130,7 +134,7 @@ def test_target_overlay_adds_skills_and_inherits_the_rest(tmp_path: Path) -> Non
 
     configs, source = load_subagents_with_target_overlay(DEFAULTS_PATH, tmp_path)
 
-    assert configs["implementer"].skills == ["frontend-design"]
+    assert configs["implementer"].skills == [SkillRef("frontend-design")]
     # Everything not overridden is inherited from the orchestrator defaults.
     assert configs["implementer"].permission_mode == "acceptEdits"
     assert configs["implementer"].prompt_template == PROJECT_ROOT / "prompts" / "implementer.md"

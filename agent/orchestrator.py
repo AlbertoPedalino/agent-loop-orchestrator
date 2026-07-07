@@ -335,7 +335,7 @@ def _run_phase(
         selected_backend,
         "read-only" if subagent.is_read_only else f"write/{permissions.permission_mode or 'default'}",
         ",".join(permissions.allowed_tools) or "none",
-        ",".join(subagent.skills) or "none",
+        ",".join(str(skill) for skill in subagent.skills) or "none",
     )
     started_at = time.monotonic()
     if selected_agent == "claude" and selected_backend == "cli":
@@ -389,7 +389,7 @@ def _run_phase(
             "permission_mode": permissions.permission_mode or "default",
             "allowed_tools": permissions.allowed_tools,
             "disallowed_tools": permissions.disallowed_tools,
-            "skills": subagent.skills,
+            "skills": [str(skill) for skill in subagent.skills],
         },
     )
     return output
