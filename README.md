@@ -301,12 +301,13 @@ YAML document that captures every parameter for one run, so it can be launched
 with a single short command:
 
 ```powershell
-.\.venv\Scripts\python.exe -m agent.main --run-file tasks/examples/inspect-character-builder.example.yaml
+.\.venv\Scripts\python.exe -m agent.main --run-file tasks/examples/run-file.example.yaml
 ```
 
-A tracked example lives at `tasks/examples/inspect-character-builder.example.yaml`.
-It is an example, not a required project config—copy it to your own task folder
-(for example `tasks/gm-board/inspect-character-builder.yaml`) and adjust it:
+A fully annotated example covering every supported field lives at
+`tasks/examples/run-file.example.yaml`. It is an example, not a required
+project config—copy it to your own task folder (for example
+`tasks/gm-board/inspect-character-builder.yaml`) and adjust it:
 
 ```powershell
 .\.venv\Scripts\python.exe -m agent.main --run-file tasks/gm-board/inspect-character-builder.yaml
