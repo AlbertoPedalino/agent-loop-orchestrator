@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import json
 import re
 
 # Tool the Claude CLI uses to invoke a discovered skill. It loads instructions
@@ -115,29 +116,87 @@ def format_skills_system_prompt(skills: list[SkillRef]) -> str:
     )
 
 
-def _skill_file(repo_path: Path, skill_name: str) -> Path:
-    return repo_path / ".claude" / "skills" / skill_name / "SKILL.md"
+def _default_claude_home() -> Path:
+    return Path.home() / ".claude"
 
 
-def inline_skills_for_codex(prompt: str, skills: list[SkillRef], repo_path: Path) -> str:
+def _installed_plugin_skill_file(skill_name: str, claude_home: Path) -> Path:
+    """Resolve ``plugin:skill`` to the installed plugin's SKILL.md.
+
+    Uses the Claude CLI's own install manifest
+    (``~/.claude/plugins/installed_plugins.json``, keys ``plugin@marketplace``)
+    so codex phases read exactly the skill content a claude phase would load
+    natively, without the user duplicating it into the repository.
+    """
+    plugin_name, _, bare_skill = skill_name.partition(":")
+    manifest_path = claude_home / "plugins" / "installed_plugins.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"Skill '{skill_name}' needs installed plugin '{plugin_name}', but no "
+            f"plugin manifest was found at {manifest_path}"
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"Could not read plugin manifest {manifest_path}: {error}") from error
+    entries = manifest.get("plugins", {}) if isinstance(manifest, dict) else {}
+    for key, installs in entries.items():
+        if not (isinstance(key, str) and key.split("@", 1)[0] == plugin_name):
+            continue
+        if not (isinstance(installs, list) and installs):
+            continue
+        install_path = installs[0].get("installPath") if isinstance(installs[0], dict) else None
+        if not isinstance(install_path, str):
+            continue
+        candidate = Path(install_path) / "skills" / bare_skill / "SKILL.md"
+        if candidate.is_file():
+            return candidate
+        raise FileNotFoundError(
+            f"Plugin '{plugin_name}' is installed but has no skill '{bare_skill}': {candidate}"
+        )
+    raise FileNotFoundError(
+        f"Skill '{skill_name}' needs plugin '{plugin_name}', which is not installed "
+        f"(checked {manifest_path})"
+    )
+
+
+def _resolve_skill_file(skill_name: str, repo_path: Path, claude_home: Path) -> Path:
+    """Find a skill's SKILL.md the way the Claude CLI would discover it.
+
+    Plain names: target repository first, then user scope. Plugin-scoped names:
+    the installed plugin's snapshot.
+    """
+    if ":" in skill_name:
+        return _installed_plugin_skill_file(skill_name, claude_home)
+    candidates = (
+        repo_path / ".claude" / "skills" / skill_name / "SKILL.md",
+        claude_home / "skills" / skill_name / "SKILL.md",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        f"Skill '{skill_name}' not found; checked: "
+        + ", ".join(str(candidate) for candidate in candidates)
+    )
+
+
+def inline_skills_for_codex(
+    prompt: str,
+    skills: list[SkillRef],
+    repo_path: Path,
+    claude_home: Path | None = None,
+) -> str:
     """Prepend skill bodies to *prompt* for a backend without a skill loader.
 
-    Only repository-local skills can be resolved; a ``plugin:name`` skill has no
-    path the orchestrator can read, so it is rejected rather than silently
-    dropped.
+    Skills are resolved from the same sources the Claude CLI uses (target
+    repository, user scope, installed plugins), so the codex backend consumes
+    the same content without the user duplicating existing skills.
     """
+    resolved_home = claude_home if claude_home is not None else _default_claude_home()
     sections: list[str] = []
     for ref in skills:
-        if ":" in ref.name:
-            raise ValueError(
-                f"Skill '{ref.name}' is plugin-scoped and cannot be inlined for the "
-                "codex backend; use a repository-local skill or the claude backend."
-            )
-        skill_path = _skill_file(repo_path, ref.name)
-        if not skill_path.is_file():
-            raise FileNotFoundError(
-                f"Skill '{ref.name}' not found for the codex backend: {skill_path}"
-            )
+        skill_path = _resolve_skill_file(ref.name, repo_path, resolved_home)
         body = skill_path.read_text(encoding="utf-8").strip()
         args_note = f"\n\nApply with args: `{ref.args}`." if ref.args else ""
         sections.append(f"## Skill: {ref.name}\n\n{body}{args_note}")
