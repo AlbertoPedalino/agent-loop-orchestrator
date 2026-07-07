@@ -1,0 +1,65 @@
+agent: claude
+backend: cli
+
+# Write-capable run on an isolated in-place branch (never main).
+plan_only: false
+use_worktree: false
+branch_mode: in_place
+create_branch: always
+base_branch: main
+agent_branch: agent/fix-readme
+
+task: |
+  Inspect and correct README.md of the agent-loop-orchestrator repository so
+  that every statement matches the actual code and CLI behavior.
+
+  ## Goal
+
+  Audit the README section by section against the source (agent/, configs/,
+  pyproject.toml) and fix everything that is wrong, stale, contradictory, or
+  incomplete. This is a documentation-only task.
+
+  ## What to verify (non-exhaustive)
+
+  - Installation: the pipx URL contains a `<owner>` placeholder -- resolve it
+    from the git remote (`git remote get-url origin`) or make the example
+    self-evidently a placeholder; confirm `agent-loop` / `agent-queue` entry
+    points actually exist in pyproject.toml.
+  - Architecture list: compare against the real modules in agent/ (e.g.
+    agent_options.py, log.py, permissions.py, report.py, run_file.py,
+    skills.py, verifier.py are not mentioned -- add only the ones worth
+    documenting, keep the list honest).
+  - CLI flags and run-file fields: every flag/field named in the README
+    (`--branch-mode`, `--create-branch`, `--allow-dirty`, `--no-stream`,
+    run-file schema, queue fields, memory config keys) must exist with the
+    documented defaults; check agent/main.py, agent/run_file.py,
+    agent/queue_cli.py, agent/memory.py.
+  - Internal contradictions: "Worktree isolation" documents opt-in cleanup
+    (`git.delete_worktree_on_success` / `_on_failure`) while "Safety notes"
+    claims "Worktrees are never removed automatically in this version" and the
+    Roadmap still lists cleanup policies as future work -- reconcile these with
+    what the code actually does.
+  - "Agents and backends": the `pip install -e ".[dev]"` code block appears
+    mid-section after a sentence about CLI authentication -- misplaced or
+    missing context; fix the flow.
+  - Machine-specific paths: examples hardcode `C:\Users\alber\...` -- replace
+    with portable placeholders while keeping the PowerShell/bash duality.
+  - Anything else found during the audit: broken formatting, dead references,
+    claims the code contradicts.
+
+  ## Constraints
+
+  - Modify README.md only. Do not change code, configs, or tests to make the
+    README true -- the README adapts to the code, never the reverse.
+  - Preserve the document's structure and tone; correct, do not rewrite for
+    style.
+  - Do not commit or push; leave changes on the agent branch working tree.
+  - Every factual claim kept or added must be verified against the source,
+    not assumed.
+
+  ## Verification
+
+  - git diff --check
+  - Diff touches only README.md.
+  - Spot-check: each corrected claim cites the file that proves it in the
+    final report.
