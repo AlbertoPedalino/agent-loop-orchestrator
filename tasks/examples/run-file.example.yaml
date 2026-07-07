@@ -1,0 +1,118 @@
+# ============================================================================
+# Annotated example run file for the agent-loop-orchestrator.
+#
+# A run file captures every parameter for ONE run, so a long command line
+# becomes:
+#
+#   python -m agent.main --run-file <this-file>.yaml
+#
+# This is an EXAMPLE, not a required project config. Recommended workflow:
+# copy it into the TARGET repository at .agent-loop/tasks/<task>.yaml, drop
+# repo_path, then launch from inside the target repo so repo_path defaults to
+# the current working directory and .agent-loop/config.yaml is discovered
+# automatically:
+#
+#   cd <target-repo>
+#   <orchestrator>/.venv/Scripts/python.exe -m agent.main \
+#     --run-file .agent-loop/tasks/<task>.yaml
+#
+# Rules to remember:
+# - Relative paths (repo_path, config, task_file) resolve against the cwd you
+#   launch from, NOT against this file's location.
+# - --run-file is mutually exclusive with every other run-parameter flag;
+#   the only supported CLI override is --repo-path.
+# - Exactly one of `task` or `task_file` is required.
+# ============================================================================
+
+# --- Target and provider ----------------------------------------------------
+
+repo_path: ../external/GM-Board   # optional; omit to use the launch cwd
+# config: path/to/config.yaml     # optional; omit to keep target-local
+                                  # discovery: <repo>/.agent-loop/config.yaml,
+                                  # then <repo>/.agent-loop.yaml, then the
+                                  # orchestrator's configs/default.yaml
+
+agent: claude                     # claude | codex          (default: claude)
+backend: cli                      # local CLI only          (default: cli)
+
+# --- Branch placement -------------------------------------------------------
+# Three ways to place the run, from most to least isolated:
+#
+#   use_worktree: true            separate linked worktree + branch
+#                                 (implies branch_mode: worktree; REQUIRED for
+#                                 queue runs with --workers > 1)
+#   branch_mode: in_place         create/checkout the agent branch directly in
+#                                 the target repo (refuses a dirty tree unless
+#                                 allow_dirty: true)
+#   branch_mode: none             run on the current branch, no branch created
+#                                 (default; fine for plan_only analysis)
+
+use_worktree: false
+branch_mode: in_place             # worktree | in_place | none
+create_branch: auto               # auto | always | never   (default: auto)
+                                  # auto = branch only for a full implementation
+                                  # loop, never for plan_only
+allow_dirty: false                # permit switching with a dirty tree
+
+base_branch: feature/unified-character-storage
+agent_branch: agent/sync-combat-sheet-hp
+                                  # required when a branch is created; must
+                                  # differ from base and cannot be a protected
+                                  # name (main, master, develop, production,
+                                  # release/*)
+
+# --- Run mode ---------------------------------------------------------------
+
+plan_only: false                  # true = read-only planner only, then stop;
+                                  # safe on any branch, creates no branch with
+                                  # create_branch: auto
+setup_only: false                 # true = prepare branch/worktree, no agent
+dry_run: false                    # true = write run metadata only; never calls
+                                  # an agent or runs verification
+
+# --- Queue metadata (NOT valid here) ----------------------------------------
+# priority, max_retries, retry_on_verification_failure, retry_on_review_revise,
+# and max_review_cycles are QUEUE-ONLY fields: agent.main --run-file rejects
+# them. To keep this file usable both directly and in the queue, stamp them at
+# enqueue time instead:
+#
+#   python -m agent.queue_cli add .agent-loop/tasks/<task>.yaml \
+#     --max-retries 2 --retry-on-review-revise --max-review-cycles 1
+
+# --- Task -------------------------------------------------------------------
+# Structure that works well in practice: Goal, pointers into project memory,
+# concrete scope, Constraints, Verification. Point at .agent-loop/memory.md
+# so the agent verifies known areas instead of re-exploring the whole repo.
+# task_file: path/to/task.md      # alternative to inline task (pick one)
+
+task: |
+  Coordinate hit points between the Encounter Builder combat and the linked
+  campaign character sheet: seed combat from the sheet's current HP at launch,
+  and write combat HP changes back to the cloud, debounced.
+
+  ## Context
+
+  Project memory (.agent-loop/memory.md) documents the encounter builder, the
+  character sheet, and the cloud layer. USE IT; only read in depth the files
+  named below.
+
+  ## Scope
+
+  - Extend the campaign import projection to carry current HP.
+  - Seed player combatants from current HP (fallback: max HP) in buildCombat.
+  - Add a debounced outbound sync hook that patches only the changed fields
+    through one generic RPC; never rewrite the whole character blob.
+  - Keep the reducer pure: all I/O lives in the sync hook.
+
+  ## Constraints
+
+  - Keep the change minimal and in the requested scope.
+  - Do not change the character schema beyond reading/patching existing fields.
+  - Do not commit, push, or switch the base/protected branch.
+  - Follow the project rules from .agent-loop/config.yaml.
+
+  ## Verification
+
+  - cd react-app && npm run build   (must pass)
+  - cd react-app && npm test        (add unit tests for the new mapping logic)
+  - git diff --check
