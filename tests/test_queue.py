@@ -626,6 +626,22 @@ def test_repository_lock_blocks_a_second_process_handle(tmp_path: Path) -> None:
     second.release()
 
 
+def test_repository_lock_serializes_same_branch_but_not_distinct_worktrees(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    first = _RepositoryLock(tmp_path / "queue", repo, branch="agent/shared")
+    same = _RepositoryLock(tmp_path / "queue", repo, branch="agent/shared")
+    distinct = _RepositoryLock(tmp_path / "queue", repo, branch="agent/other")
+
+    assert first.try_acquire()
+    assert not same.try_acquire()
+    assert distinct.try_acquire()
+    first.release()
+    distinct.release()
+
+
 def test_claim_moves_unparseable_yaml_to_failed(tmp_path: Path) -> None:
     queue_dir = tmp_path / "queue"
     queued = queue_dir / "queued"

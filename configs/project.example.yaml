@@ -12,11 +12,20 @@ backend:
                           #       (ANTHROPIC_API_KEY / OPENAI_API_KEY from the
                           #       environment or the orchestrator .env)
 
+git:
+  commit_on_success: true  # deterministic commit after tests + explicit reviewer approval
+
 limits:
   max_fix_attempts: 2
   max_changed_files: 5
   phase_timeout_seconds: 600
   # max_budget_usd is supported only with backend: api and agent: claude.
+
+testing:
+  policy: required
+  paths:
+    - tests/**
+  forbid_test_deletion: true
 
 verification:
   commands:
@@ -24,7 +33,7 @@ verification:
 
 blocked_commands:
   - git push
-  - git commit
+  - git commit              # remains blocked for agents; orchestrator owns the checkpoint
   - rm -rf
   - docker compose down -v
 

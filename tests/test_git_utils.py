@@ -53,3 +53,37 @@ def test_git_diff_includes_staged_and_untracked_files(tmp_path: Path) -> None:
     assert "+staged-change" in diff
     assert "brand-new.txt" in diff
     assert "+new-content" in diff
+
+
+def test_changed_and_deleted_paths_are_reported(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    (tmp_path / "old-test.py").write_text("old\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "init"], check=True)
+
+    (tmp_path / "old-test.py").unlink()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_new.py").write_text("def test_new(): pass\n", encoding="utf-8")
+
+    assert set(git_utils.get_changed_paths(tmp_path)) == {
+        "old-test.py",
+        "tests/test_new.py",
+    }
+    assert git_utils.get_deleted_paths(tmp_path) == ["old-test.py"]
+
+
+def test_checkpoint_refuses_unexpected_or_protected_branch(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    (tmp_path / "base.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "init"], check=True)
+    (tmp_path / "base.txt").write_text("changed\n", encoding="utf-8")
+
+    with pytest.raises(git_utils.GitOperationError, match="unexpected branch"):
+        git_utils.commit_all_changes(tmp_path, "checkpoint", "agent/expected")
+
+    current = git_utils.get_current_branch(tmp_path)
+    if current != "main":
+        subprocess.run(["git", "-C", str(tmp_path), "checkout", "-qb", "main"], check=True)
+    with pytest.raises(git_utils.GitOperationError, match="protected branch"):
+        git_utils.commit_all_changes(tmp_path, "checkpoint", "main")

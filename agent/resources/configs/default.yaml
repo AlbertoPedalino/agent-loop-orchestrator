@@ -19,11 +19,21 @@ git:
   require_clean_repo: false
   delete_worktree_on_success: false
   delete_worktree_on_failure: false
+  commit_on_success: false
 
 limits:
   max_fix_attempts: 3
   max_changed_files: 8
   phase_timeout_seconds: 600
+
+testing:
+  policy: optional
+  paths:
+    - tests/**
+    - test_*.py
+    - "**/test_*.py"
+    - "**/*_test.py"
+  forbid_test_deletion: false
 
 memory:
   enabled: true

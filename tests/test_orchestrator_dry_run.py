@@ -49,6 +49,39 @@ def test_result_status_honours_review_gate(
     assert orchestrator._result_status(passed, parsed) == expected
 
 
+def test_required_testing_policy_rejects_missing_or_deleted_tests(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(orchestrator, "get_changed_paths", lambda path: ["src/app.py"])
+    monkeypatch.setattr(orchestrator, "get_deleted_paths", lambda path: [])
+    with pytest.raises(RuntimeError, match="requires at least one"):
+        orchestrator._enforce_testing_policy(
+            tmp_path,
+            policy="required",
+            test_patterns=["tests/**"],
+            forbid_test_deletion=True,
+        )
+
+    monkeypatch.setattr(orchestrator, "get_changed_paths", lambda path: ["tests/test_app.py"])
+    monkeypatch.setattr(orchestrator, "get_deleted_paths", lambda path: ["tests/test_old.py"])
+    with pytest.raises(RuntimeError, match="Test deletion is forbidden"):
+        orchestrator._enforce_testing_policy(
+            tmp_path,
+            policy="required",
+            test_patterns=["tests/**"],
+            forbid_test_deletion=True,
+        )
+
+    monkeypatch.setattr(orchestrator, "get_changed_paths", lambda path: ["tests/test_old.py"])
+    with pytest.raises(RuntimeError, match="requires at least one"):
+        orchestrator._enforce_testing_policy(
+            tmp_path,
+            policy="required",
+            test_patterns=["tests/**"],
+            forbid_test_deletion=False,
+        )
+
+
 def _write_cleanup_config(
     tmp_path: Path, *, delete_on_success: bool = False, delete_on_failure: bool = False
 ) -> Path:

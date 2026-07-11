@@ -7,7 +7,7 @@ task -> target validation -> optional worktree -> planner -> implementer
      -> verification -> fixer loop -> reviewer -> report
 ```
 
-It is designed to keep orchestration policy outside the target repository. It does not commit, push, delete branches, or modify protected branches. Worktree cleanup is opt-in and removes only clean worktrees created by the current run.
+It is designed to keep orchestration policy outside the target repository. Agents cannot commit or push. An opt-in deterministic checkpoint may commit a verified, reviewer-approved task on its configured non-protected agent branch; it never pushes, merges, deletes branches, or modifies protected branches. Worktree cleanup is opt-in and removes only clean worktrees created by the current run.
 
 ## Installation
 
@@ -152,7 +152,42 @@ What happens for a full in-place implementation loop:
 3. Otherwise fetch the remote only when the base branch is not already available, then create the agent branch from the base: `git checkout -b agent/<name> <base>`.
 4. Run planner → implementer → verification → fixer → reviewer on that branch.
 
-Safety: the agent branch must be set, must differ from the base branch, and cannot be a protected name (`main`, `master`, `develop`, `production`, `release/*`). The orchestrator never commits, pushes, merges, or deletes branches.
+Safety: the agent branch must be set, must differ from the base branch, and cannot be a protected name (`main`, `master`, `develop`, `production`, `release/*`). The orchestrator never pushes, merges, or deletes branches. It commits only through the opt-in approved-checkpoint policy described below.
+
+## Cumulative tests and approved checkpoints
+
+For a sequential test-driven task stream, require every implementation task to leave durable test coverage and checkpoint only reviewer-approved results:
+
+```yaml
+git:
+  branch_mode: in_place
+  create_branch: auto
+  base_branch: main
+  agent_branch: agent/cumulative-work
+  commit_on_success: true
+
+testing:
+  policy: required
+  paths:
+    - tests/**
+  forbid_test_deletion: true
+
+verification:
+  commands:
+    - python -m pytest -q
+```
+
+`testing.policy: required` needs at least one verification command and at least one added or modified path matching `testing.paths`. The complete configured suite runs on every task, so committed tests become termination conditions for later tasks on the same branch. `forbid_test_deletion` rejects deleted matching test files.
+
+`git.commit_on_success` is deliberately stricter than giving the model Git permissions. The agent still receives `git commit` as a blocked command. After verification and review, the orchestrator creates one checkpoint only when all of these conditions hold:
+
+- the run uses a configured worktree or in-place agent branch;
+- the agent worktree was clean when the task started;
+- at least one verification command is configured and every command passes;
+- verification passed and the reviewer emitted an explicit `approve` verdict;
+- the current branch exactly matches the configured agent branch and is not protected.
+
+`revise`, `reject`, a missing verdict, a failing suite, or a dirty starting worktree never creates a commit. Use sequential workers for a cumulative branch; parallel tasks should continue to use separate worktrees and branches.
 
 Protected-branch guard: write-capable phases (implementer, fixer) refuse to run on a protected branch and must never leave the repository on one. Read-only phases (planner, reviewer) are allowed on a protected branch because their tool policy prevents any modification—so a `plan_only` analysis works directly on `main` without creating a branch. The report records the original/resolved repo paths, branch mode, create-branch mode, original branch, base branch, agent branch, whether a branch was created or reused, the final branch, and whether the working tree is dirty at the end.
 
@@ -476,7 +511,7 @@ Semantics:
 
 - **Dependencies**: `depends_on` names stable queue `id` values. A dependent task stays in `queued/` until every dependency has a `done/` result. If a dependency is in `failed/`, the dependent task is moved to `failed/` with a `dependency-failed` sidecar. Missing dependencies stay queued and `list` reports them as waiting; duplicate ids and dependency cycles are failed explicitly so the queue does not wedge silently.
 
-- **Claiming** uses an exclusive `.claim` marker (`O_CREAT | O_EXCL`) before moving a task to `running/`, because a bare rename is not a reliable mutex on Windows (`MoveFileExW` renames by handle, so two racing renames can both report success). Multiple workers — threads or separate processes — can safely share one queue. Non-worktree tasks additionally take a cross-process OS lock keyed by repository path, so separate `--workers 1` processes cannot edit the same checkout concurrently.
+- **Claiming** uses an exclusive `.claim` marker (`O_CREAT | O_EXCL`) before moving a task to `running/`, because a bare rename is not a reliable mutex on Windows (`MoveFileExW` renames by handle, so two racing renames can both report success). Multiple workers — threads or separate processes — can safely share one queue. Non-worktree tasks take a cross-process OS lock keyed by repository path; worktree tasks lock the repository/agent-branch pair, so distinct branches remain parallel while two tasks can never edit the same cumulative worktree concurrently.
 - **Parallelism**: with `--workers` above 1, every task must run in an isolated worktree (`use_worktree: true` or `branch_mode: worktree`); tasks without isolation are failed with a validation error instead of letting two agents edit the same working tree.
 - **Retries** re-enqueue a crashed task with an exponential-backoff `not_before` timestamp. When the failed attempt already produced a plan, the retry records `resume_from` and skips the planner phase, reusing `planner_output.md` from the failed run. `retry_on_verification_failure: true` extends this to runs whose verification never passed.
 - **Aggregate limits**: `--max-tasks` bounds how many attempts one `run` invocation claims; `--max-minutes` bounds its wall-clock time — the safety rails for an unattended session.
@@ -492,7 +527,7 @@ The reviewer phase is asked to end with a fenced ` ```verdict ``` ` block contai
 - Do not use this tool to bypass target-repository policy.
 - Review all proposed changes and reports before committing.
 - Do not enable real Claude or Codex execution in automated tests.
-- The orchestrator never performs `git commit` or `git push`.
+- Agents never perform `git commit` or `git push`; the orchestrator may perform only the opt-in approved checkpoint described above and never pushes.
 - Worktree cleanup is opt-in (`git.delete_worktree_on_success` / `git.delete_worktree_on_failure`) and removes only clean worktrees created by the current run; reused or dirty worktrees are never removed.
 
 ## Development

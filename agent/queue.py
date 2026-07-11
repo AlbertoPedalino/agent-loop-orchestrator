@@ -67,8 +67,13 @@ _STATE_DIRS = ("queued", "running", "done", "failed")
 class _RepositoryLock:
     """Cross-process advisory lock serializing in-place work per repository."""
 
-    def __init__(self, queue_dir: Path, repo_path: Path) -> None:
-        identity = str(repo_path.expanduser().resolve()).casefold().encode("utf-8")
+    def __init__(self, queue_dir: Path, repo_path: Path, branch: str | None = None) -> None:
+        identity_text = str(repo_path.expanduser().resolve())
+        if branch is not None:
+            identity_text += f"\0branch:{branch}"
+        if os.name == "nt":
+            identity_text = identity_text.casefold()
+        identity = identity_text.encode("utf-8")
         digest = hashlib.sha256(identity).hexdigest()
         lock_dir = queue_dir.expanduser().resolve() / ".repo-locks"
         lock_dir.mkdir(parents=True, exist_ok=True)
@@ -1002,10 +1007,12 @@ def _worker_loop(
         caught: Exception | None = None
         repository_lock: _RepositoryLock | None = None
         try:
-            if not task.uses_worktree:
-                assert task.run.repo_path is not None
-                repository_lock = _RepositoryLock(queue_dir, task.run.repo_path)
-                repository_lock.acquire(poll_seconds)
+            assert task.run.repo_path is not None
+            lock_branch = task.run.agent_branch if task.uses_worktree else None
+            repository_lock = _RepositoryLock(
+                queue_dir, task.run.repo_path, branch=lock_branch
+            )
+            repository_lock.acquire(poll_seconds)
             result = executor(task)
         except Exception as error:  # noqa: BLE001 - a task crash must not kill the worker
             caught = error

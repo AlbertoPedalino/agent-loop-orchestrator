@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from fnmatch import fnmatchcase
 import json
 import time
 
@@ -19,11 +20,14 @@ from agent.log import get_logger
 from agent.git_utils import (
     branch_exists,
     checkout_in_place_agent_branch,
+    commit_all_changes,
     create_worktree,
     ensure_git_repo,
     fetch_remote,
     find_worktree_for_branch,
     get_current_branch,
+    get_changed_paths,
+    get_deleted_paths,
     get_git_diff,
     get_git_status,
     is_protected_branch,
@@ -186,6 +190,61 @@ def _result_status(passed: bool, review_verdict: ReviewVerdict | None) -> str:
     if review_verdict is None or review_verdict.verdict == "approve":
         return "completed"
     return "review-rejected" if review_verdict.verdict == "reject" else "review-revise"
+
+
+def _matches_any_path(path: str, patterns: list[str]) -> bool:
+    normalized = path.replace("\\", "/")
+    return any(fnmatchcase(normalized, pattern) for pattern in patterns)
+
+
+def _enforce_testing_policy(
+    repo_path: Path,
+    *,
+    policy: str,
+    test_patterns: list[str],
+    forbid_test_deletion: bool,
+) -> list[str]:
+    """Require a persistent test diff and reject deleted tests when configured."""
+    deleted_tests = [
+        path for path in get_deleted_paths(repo_path) if _matches_any_path(path, test_patterns)
+    ]
+    deleted_set = set(deleted_tests)
+    changed_tests = [
+        path
+        for path in get_changed_paths(repo_path)
+        if path not in deleted_set and _matches_any_path(path, test_patterns)
+    ]
+    if forbid_test_deletion and deleted_tests:
+        raise RuntimeError("Test deletion is forbidden: " + ", ".join(deleted_tests))
+    if policy == "required" and not changed_tests:
+        raise RuntimeError(
+            "Testing policy requires at least one added or modified test file matching: "
+            + ", ".join(test_patterns)
+        )
+    return changed_tests
+
+
+def _testing_prompt(policy: str, test_patterns: list[str], forbid_test_deletion: bool) -> str:
+    if policy != "required" and not forbid_test_deletion:
+        return ""
+    lines = ["# Testing Policy", ""]
+    if policy == "required":
+        lines.append(
+            "This task must add or modify at least one durable test matching: "
+            + ", ".join(test_patterns)
+            + "."
+        )
+    if forbid_test_deletion:
+        lines.append("Do not delete test files.")
+    lines.append("The full configured verification suite must pass before acceptance.")
+    return "\n".join(lines)
+
+
+def _checkpoint_message(task: str) -> str:
+    summary = " ".join(task.split())
+    if len(summary) > 72:
+        summary = summary[:69].rstrip() + "..."
+    return f"agent-loop: {summary}"
 
 
 def _resolve_agent_provider(config: dict[str, Any], override: str | None) -> str:
@@ -720,6 +779,7 @@ def run_orchestrator(
     backend_config = _mapping(config, "backend")
     git_config = _mapping(config, "git")
     limits = _mapping(config, "limits")
+    testing_config = _mapping(config, "testing")
     verification_config = _mapping(config, "verification")
     if max_fix_attempts is not None:
         if max_fix_attempts < 0:
@@ -752,6 +812,10 @@ def run_orchestrator(
     )
     delete_worktree_on_success = _optional_bool(git_config, "delete_worktree_on_success")
     delete_worktree_on_failure = _optional_bool(git_config, "delete_worktree_on_failure")
+    commit_on_success = _optional_bool(git_config, "commit_on_success")
+    checkpoint_enabled_for_run = commit_on_success and not (
+        plan_only or setup_only or dry_run
+    )
     selected_base_branch = base_branch or git_config.get("base_branch")
     selected_agent_branch = agent_branch or git_config.get("agent_branch")
     wants_in_place_branch = selected_branch_mode == "in_place" and _wants_in_place_branch(
@@ -773,12 +837,42 @@ def run_orchestrator(
             raise ValueError(f"Refusing protected agent branch: {selected_agent_branch}")
         if selected_agent_branch.strip() == selected_base_branch.strip():
             raise ValueError("Agent branch must differ from the base branch")
+    if (
+        checkpoint_enabled_for_run
+        and not (selected_use_worktree or wants_in_place_branch)
+    ):
+        raise ValueError(
+            "git.commit_on_success requires worktree mode or an in-place agent branch"
+        )
     if _optional_bool(git_config, "require_clean_repo") and get_git_status(resolved_repo_path).strip():
         raise ValueError("Target repository must be clean according to git.require_clean_repo")
 
     raw_commands = verification_config.get("commands", [])
     if not isinstance(raw_commands, list) or not all(isinstance(command, str) for command in raw_commands):
         raise ValueError("verification.commands must be a list of strings")
+    if checkpoint_enabled_for_run and not raw_commands:
+        raise ValueError("git.commit_on_success needs at least one verification command")
+    testing_policy = testing_config.get("policy", "optional")
+    if testing_policy not in {"optional", "required"}:
+        raise ValueError("testing.policy must be 'optional' or 'required'")
+    test_patterns = testing_config.get(
+        "paths", ["tests/**", "test_*.py", "**/test_*.py", "**/*_test.py"]
+    )
+    if not isinstance(test_patterns, list) or not test_patterns or not all(
+        isinstance(pattern, str) and pattern.strip() for pattern in test_patterns
+    ):
+        raise ValueError("testing.paths must be a non-empty list of strings")
+    forbid_test_deletion = _optional_bool(testing_config, "forbid_test_deletion")
+    if testing_policy == "required" and not raw_commands:
+        raise ValueError("testing.policy 'required' needs at least one verification command")
+    formatted_testing_policy = _testing_prompt(
+        testing_policy, test_patterns, forbid_test_deletion
+    )
+    formatted_project_context = "\n\n".join(
+        section
+        for section in (formatted_project_context, formatted_testing_policy)
+        if section
+    )
     blocked_commands = config.get("blocked_commands", [])
     if not isinstance(blocked_commands, list) or not all(
         isinstance(command, str) for command in blocked_commands
@@ -919,6 +1013,13 @@ def run_orchestrator(
                 f"{branch_result.final_branch} in {resolved_repo_path}"
             )
 
+    if checkpoint_enabled_for_run:
+        initial_status = get_git_status(active_repo_path).strip()
+        if initial_status:
+            raise RuntimeError(
+                "git.commit_on_success requires a clean agent worktree at task start"
+            )
+
     logger.info("Prepared pipeline: %s", " -> ".join(PIPELINE_STEPS))
     logger.info("Target repository: %s", active_repo_path)
     logger.info("Agent: %s, backend: %s (stream=%s)", selected_agent, selected_backend, stream)
@@ -952,6 +1053,8 @@ def run_orchestrator(
         "worktree created": "yes" if worktree_created else "no",
         "worktree reused": "yes" if reused_worktree else "no",
         "worktree cleanup": "not requested",
+        "commit on success": "enabled" if commit_on_success else "disabled",
+        "checkpoint commit": "not created",
         "verification": "not run",
         "fix attempts": 0,
         "changed files": 0,
@@ -1167,6 +1270,12 @@ def run_orchestrator(
 
             final_diff = get_git_diff(active_repo_path)
             _enforce_changed_file_limit(active_repo_path, max_changed_files, "fixer loop")
+            changed_tests = _enforce_testing_policy(
+                active_repo_path,
+                policy=testing_policy,
+                test_patterns=test_patterns,
+                forbid_test_deletion=forbid_test_deletion,
+            )
             _write_markdown(run_dir / "diff_after_fixes.patch", final_diff or "# No Diff\n")
             reviewer_output = _run_phase(
                 phase="reviewer",
@@ -1208,6 +1317,7 @@ def run_orchestrator(
             details["verification"] = "passed" if passed else "failed after fix limit"
             details["fix attempts"] = fix_attempts
             details["changed files"] = len(status_lines)
+            details["changed tests"] = len(changed_tests)
             details["diff lines"] = len(final_diff.splitlines())
             if not passed:
                 details["risks"] = (
@@ -1226,6 +1336,19 @@ def run_orchestrator(
             _record_run_history(
                 memory_config, task=task, status=status, fix_attempts=fix_attempts, run_dir=run_dir
             )
+            if commit_on_success:
+                if review_verdict is None or review_verdict.verdict != "approve":
+                    details["checkpoint commit"] = "skipped (explicit approval required)"
+                elif not get_git_status(active_repo_path).strip():
+                    details["checkpoint commit"] = "skipped (no changes)"
+                else:
+                    assert isinstance(selected_agent_branch, str)
+                    revision = commit_all_changes(
+                        active_repo_path,
+                        _checkpoint_message(task),
+                        selected_agent_branch,
+                    )
+                    details["checkpoint commit"] = revision
 
         _finalize_git_details(details, active_repo_path)
         _cleanup_worktree_if_requested(

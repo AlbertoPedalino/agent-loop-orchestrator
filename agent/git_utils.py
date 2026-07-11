@@ -113,6 +113,34 @@ def get_git_diff(path: Path, timeout_seconds: int = 30) -> str:
     return "".join(sections)
 
 
+def get_changed_paths(path: Path, timeout_seconds: int = 30) -> list[str]:
+    """Return tracked and untracked changed paths relative to the repository."""
+    tracked = _run_git(path, "diff", "HEAD", "--name-only", "--no-ext-diff", timeout=timeout_seconds)
+    if tracked.returncode != 0:
+        tracked = _run_git(path, "diff", "--name-only", "--no-ext-diff", timeout=timeout_seconds)
+    untracked = _run_git(
+        path, "ls-files", "--others", "--exclude-standard", timeout=timeout_seconds
+    )
+    paths = [*tracked.stdout.splitlines(), *untracked.stdout.splitlines()]
+    return list(dict.fromkeys(item.strip() for item in paths if item.strip()))
+
+
+def get_deleted_paths(path: Path, timeout_seconds: int = 30) -> list[str]:
+    """Return deleted tracked paths relative to the repository."""
+    result = _run_git(
+        path,
+        "diff",
+        "HEAD",
+        "--name-only",
+        "--diff-filter=D",
+        "--no-ext-diff",
+        timeout=timeout_seconds,
+    )
+    if result.returncode != 0:
+        return []
+    return [item.strip() for item in result.stdout.splitlines() if item.strip()]
+
+
 def is_protected_branch(branch: str) -> bool:
     """Return whether a branch must never be used as an agent branch."""
     normalized = branch.strip().casefold()
@@ -264,6 +292,27 @@ def create_and_checkout_branch(path: Path, branch_name: str, base_ref: str) -> s
     """Create a new branch from *base_ref* and check it out in place."""
     result = _run_git(path, "checkout", "-b", branch_name, base_ref, timeout=120)
     return _git_output_or_error(result, f"branch creation '{branch_name}'")
+
+
+def commit_all_changes(path: Path, message: str, expected_branch: str) -> str:
+    """Commit the complete clean-baseline task diff on an expected agent branch."""
+    branch = get_current_branch(path)
+    if branch != expected_branch:
+        raise GitOperationError(
+            f"Refusing checkpoint on unexpected branch '{branch}'; expected '{expected_branch}'"
+        )
+    if is_protected_branch(branch):
+        raise GitOperationError(f"Refusing checkpoint on protected branch '{branch}'")
+    normalized_message = " ".join(message.split()).strip()
+    if not normalized_message:
+        raise ValueError("Commit message must not be empty")
+    _git_output_or_error(_run_git(path, "add", "--all"), "checkpoint staging")
+    _git_output_or_error(
+        _run_git(path, "commit", "-m", normalized_message, timeout=180),
+        "checkpoint commit",
+    )
+    result = _run_git(path, "rev-parse", "HEAD")
+    return _git_output_or_error(result, "checkpoint revision lookup").strip()
 
 
 def checkout_in_place_agent_branch(

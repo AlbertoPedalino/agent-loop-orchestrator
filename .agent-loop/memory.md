@@ -1,7 +1,7 @@
 # Project Memory
 
 ## What this is
-`agent-loop-orchestrator` — external control plane running bounded Claude/Codex loops against a target repo: task → validation → optional worktree/branch → planner → implementer → verification → fixer loop → reviewer → report. Never commits/pushes/deletes branches.
+`agent-loop-orchestrator` - external control plane running bounded Claude/Codex loops against a target repo: task -> validation -> optional worktree/branch -> planner -> implementer -> verification -> fixer loop -> reviewer -> report. Agents never commit or push. Optional deterministic checkpoints commit only verified, explicitly approved changes on the configured non-protected agent branch; the orchestrator never pushes, merges, or deletes branches.
 
 ## Entry points
 - `pyproject.toml [project.scripts]`: `agent-loop = agent.main:main`, `agent-queue = agent.queue_cli:main`.
