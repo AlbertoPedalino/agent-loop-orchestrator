@@ -182,7 +182,7 @@ verification:
 `git.commit_on_success` is deliberately stricter than giving the model Git permissions. The agent still receives `git commit` as a blocked command. After verification and review, the orchestrator creates one checkpoint only when all of these conditions hold:
 
 - the run uses a configured worktree or in-place agent branch;
-- the agent worktree was clean when the task started;
+- the agent worktree was clean when the task started, except for a bounded revision pass resuming a recorded prior run plan;
 - at least one verification command is configured and every command passes;
 - verification passed and the reviewer emitted an explicit `approve` verdict;
 - the current branch exactly matches the configured agent branch and is not protected.

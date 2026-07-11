@@ -751,6 +751,11 @@ def run_orchestrator(
     resource_root = _resource_root()
     if resume_from_run_dir is not None and (plan_only or setup_only or dry_run):
         raise ValueError("resume_from_run_dir requires a full implementation loop")
+    resumable_planner_output = (
+        load_resumable_planner_output(resume_from_run_dir.expanduser().resolve())
+        if resume_from_run_dir is not None
+        else None
+    )
     resolved_repo_path = repo_path.expanduser().resolve()
     if not resolved_repo_path.is_dir():
         raise NotADirectoryError(f"Repository path is not a directory: {resolved_repo_path}")
@@ -1003,7 +1008,7 @@ def run_orchestrator(
                 selected_agent_branch,
                 selected_base_branch,
                 remote=selected_remote,
-                allow_dirty=selected_allow_dirty,
+                allow_dirty=selected_allow_dirty or resumable_planner_output is not None,
             )
             branch_created = branch_result.created
             branch_reused = branch_result.reused
@@ -1015,7 +1020,7 @@ def run_orchestrator(
 
     if checkpoint_enabled_for_run:
         initial_status = get_git_status(active_repo_path).strip()
-        if initial_status:
+        if initial_status and resumable_planner_output is None:
             raise RuntimeError(
                 "git.commit_on_success requires a clean agent worktree at task start"
             )
@@ -1111,18 +1116,14 @@ def run_orchestrator(
             details["mode"] = "plan-only" if plan_only else "full-pipeline"
             status = "dry-run-plan-only" if plan_only else "dry-run"
         else:
-            resumed_planner_output: str | None = None
             if resume_from_run_dir is not None:
-                resumed_planner_output = load_resumable_planner_output(
-                    resume_from_run_dir.expanduser().resolve()
-                )
-                if resumed_planner_output is None:
+                if resumable_planner_output is None:
                     logger.info(
                         "No resumable planner output in %s; running the planner.",
                         resume_from_run_dir,
                     )
-            if resumed_planner_output is not None:
-                planner_output = resumed_planner_output
+            if resumable_planner_output is not None:
+                planner_output = resumable_planner_output
                 details["planner"] = f"resumed from {resume_from_run_dir}"
                 logger.info("Reusing planner output from %s", resume_from_run_dir)
             else:
