@@ -118,3 +118,24 @@ def test_main_passes_codex_agent_flag(monkeypatch: pytest.MonkeyPatch, tmp_path:
 
     assert main_module.main() == 0
     assert captured["agent"] == "codex"
+
+
+@pytest.mark.parametrize("status", ["verification-failed", "review-revise", "review-rejected"])
+def test_main_returns_nonzero_for_unsuccessful_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: str
+) -> None:
+    monkeypatch.setattr(
+        main_module,
+        "resolve_config_selection",
+        lambda *args: ConfigSelection(tmp_path / "config.yaml", "test"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "run_orchestrator",
+        lambda **kwargs: OrchestrationResult(tmp_path, tmp_path / "report.md", status, tmp_path),
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["agent.main", "--repo-path", str(tmp_path), "--task", "task"]
+    )
+
+    assert main_module.main() == 1

@@ -11,6 +11,10 @@ from agent.subagents import load_subagents_config
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_CONFIG = PROJECT_ROOT / "agent" / "resources" / "configs" / "default.yaml"
+DEFAULT_SUBAGENTS = (
+    PROJECT_ROOT / "agent" / "resources" / "configs" / "subagents.default.yaml"
+)
 
 PROJECT_CONTEXT = {
     "data_sources": {
@@ -47,7 +51,7 @@ def test_target_project_context_loads_and_formats(tmp_path: Path) -> None:
 
 
 def test_prompt_omits_persistent_section_when_context_is_absent() -> None:
-    subagent = load_subagents_config(PROJECT_ROOT / "configs" / "subagents.default.yaml")["planner"]
+    subagent = load_subagents_config(DEFAULT_SUBAGENTS)["planner"]
 
     prompt = orchestrator._read_prompt(subagent, "specific task", PROJECT_ROOT)
 
@@ -57,7 +61,7 @@ def test_prompt_omits_persistent_section_when_context_is_absent() -> None:
 
 def test_all_phase_prompts_include_project_context() -> None:
     formatted = orchestrator._format_project_context(PROJECT_CONTEXT)
-    subagents = load_subagents_config(PROJECT_ROOT / "configs" / "subagents.default.yaml")
+    subagents = load_subagents_config(DEFAULT_SUBAGENTS)
 
     for phase in ("planner", "implementer", "fixer", "reviewer"):
         prompt = orchestrator._read_prompt(
@@ -76,7 +80,7 @@ def test_dry_run_plan_only_records_project_context(
 ) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    config = deepcopy(orchestrator.load_config(PROJECT_ROOT / "configs" / "default.yaml"))
+    config = deepcopy(orchestrator.load_config(DEFAULT_CONFIG))
     config["project_context"] = {
         "allowed_sources": ["XPHB"],
         "rules": ["Use the configured source whitelist."],
@@ -91,7 +95,7 @@ def test_dry_run_plan_only_records_project_context(
     result = orchestrator.run_orchestrator(
         repo_path=tmp_path,
         task="specific task",
-        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        config_path=DEFAULT_CONFIG,
         config_source="target-local .agent-loop/config.yaml",
         dry_run=True,
         plan_only=True,
@@ -116,7 +120,7 @@ def test_full_pipeline_passes_context_to_every_phase(
 ) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    config = deepcopy(orchestrator.load_config(PROJECT_ROOT / "configs" / "default.yaml"))
+    config = deepcopy(orchestrator.load_config(DEFAULT_CONFIG))
     config["project_context"] = {"rules": ["Persistent test rule."]}
     prompts: dict[str, str] = {}
     verification_results = iter(
@@ -145,7 +149,7 @@ def test_full_pipeline_passes_context_to_every_phase(
     result = orchestrator.run_orchestrator(
         repo_path=tmp_path,
         task="specific task",
-        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        config_path=DEFAULT_CONFIG,
     )
 
     assert result.status == "completed"

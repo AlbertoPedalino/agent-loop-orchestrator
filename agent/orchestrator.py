@@ -83,6 +83,11 @@ PIPELINE_STEPS = (
 logger = get_logger()
 
 
+def _resource_root() -> Path:
+    """Return the installed package's immutable runtime-resource directory."""
+    return Path(__file__).resolve().parent / "resources"
+
+
 @dataclass(frozen=True)
 class OrchestrationResult:
     """Artifacts and target context produced by an orchestration run."""
@@ -128,10 +133,10 @@ def resolve_config_selection(
         if candidate.is_file():
             return ConfigSelection(path=candidate, source=source)
 
-    default_path = fallback_config_path or Path(__file__).resolve().parent.parent / "configs" / "default.yaml"
+    default_path = fallback_config_path or _resource_root() / "configs" / "default.yaml"
     return ConfigSelection(
         path=default_path.expanduser().resolve(),
-        source="fallback orchestrator configs/default.yaml",
+        source="packaged fallback agent/resources/configs/default.yaml",
     )
 
 
@@ -159,6 +164,28 @@ def _optional_bool(config: dict[str, Any], key: str, default: bool = False) -> b
     if not isinstance(value, bool):
         raise ValueError(f"Configuration '{key}' must be a boolean")
     return value
+
+
+def _changed_files(repo_path: Path) -> list[str]:
+    """Return every changed path, including files inside untracked directories."""
+    return [line for line in get_git_status(repo_path).splitlines() if line]
+
+
+def _enforce_changed_file_limit(repo_path: Path, maximum: int, phase: str) -> None:
+    changed = _changed_files(repo_path)
+    if len(changed) > maximum:
+        raise RuntimeError(
+            f"Changed-file limit exceeded after {phase}: {len(changed)} > {maximum}"
+        )
+
+
+def _result_status(passed: bool, review_verdict: ReviewVerdict | None) -> str:
+    """Resolve the terminal status without hiding an actionable review verdict."""
+    if not passed:
+        return "verification-failed"
+    if review_verdict is None or review_verdict.verdict == "approve":
+        return "completed"
+    return "review-rejected" if review_verdict.verdict == "reject" else "review-revise"
 
 
 def _resolve_agent_provider(config: dict[str, Any], override: str | None) -> str:
@@ -662,6 +689,7 @@ def run_orchestrator(
     only the planner phase and then records read-only Git state.
     """
     project_root = Path(__file__).resolve().parent.parent
+    resource_root = _resource_root()
     if resume_from_run_dir is not None and (plan_only or setup_only or dry_run):
         raise ValueError("resume_from_run_dir requires a full implementation loop")
     resolved_repo_path = repo_path.expanduser().resolve()
@@ -708,7 +736,9 @@ def run_orchestrator(
     if not isinstance(selected_remote, str) or not selected_remote.strip():
         raise ValueError("Git remote must be a non-empty string")
     selected_use_worktree = (
-        use_worktree if use_worktree is not None else bool(project_config.get("use_worktree", False))
+        use_worktree
+        if use_worktree is not None
+        else _optional_bool(project_config, "use_worktree")
     )
     requested_branch_mode = branch_mode or git_config.get("branch_mode")
     selected_branch_mode, selected_use_worktree = _resolve_branch_mode(
@@ -718,7 +748,7 @@ def run_orchestrator(
     if selected_create_branch not in {"auto", "always", "never"}:
         raise ValueError("create_branch must be 'auto', 'always', or 'never'")
     selected_allow_dirty = (
-        allow_dirty if allow_dirty is not None else bool(git_config.get("allow_dirty", False))
+        allow_dirty if allow_dirty is not None else _optional_bool(git_config, "allow_dirty")
     )
     delete_worktree_on_success = _optional_bool(git_config, "delete_worktree_on_success")
     delete_worktree_on_failure = _optional_bool(git_config, "delete_worktree_on_failure")
@@ -743,7 +773,7 @@ def run_orchestrator(
             raise ValueError(f"Refusing protected agent branch: {selected_agent_branch}")
         if selected_agent_branch.strip() == selected_base_branch.strip():
             raise ValueError("Agent branch must differ from the base branch")
-    if bool(git_config.get("require_clean_repo", False)) and get_git_status(resolved_repo_path).strip():
+    if _optional_bool(git_config, "require_clean_repo") and get_git_status(resolved_repo_path).strip():
         raise ValueError("Target repository must be clean according to git.require_clean_repo")
 
     raw_commands = verification_config.get("commands", [])
@@ -794,7 +824,7 @@ def run_orchestrator(
         subagents_source = f"explicit --subagents-config ({subagents_config_path})"
     else:
         subagents, subagents_source = load_subagents_with_target_overlay(
-            project_root / "configs" / "subagents.default.yaml", resolved_repo_path
+            resource_root / "configs" / "subagents.default.yaml", resolved_repo_path
         )
     logger.info("Subagents: %s", subagents_source)
     required_subagents = ("planner", "implementer", "fixer", "reviewer")
@@ -1076,13 +1106,9 @@ def run_orchestrator(
             _write_markdown(run_dir / "implementer_output.md", implementer_output)
             diff = get_git_diff(active_repo_path)
             _write_markdown(run_dir / "diff_after_implementer.patch", diff or "# No Diff\n")
-            changed_after_implementer = [
-                line for line in get_git_status(active_repo_path).splitlines() if line
-            ]
-            if len(changed_after_implementer) > max_changed_files:
-                raise RuntimeError(
-                    f"Changed-file limit exceeded: {len(changed_after_implementer)} > {max_changed_files}"
-                )
+            _enforce_changed_file_limit(
+                active_repo_path, max_changed_files, "implementer"
+            )
 
             verification_results = run_verification_commands(
                 active_repo_path,
@@ -1124,12 +1150,15 @@ def run_orchestrator(
                     hooks_config=hooks_config,
                 )
                 _write_markdown(run_dir / f"fixer_output_attempt_{fix_attempts}.md", fixer_output)
+                _enforce_changed_file_limit(
+                    active_repo_path, max_changed_files, f"fixer attempt {fix_attempts}"
+                )
                 verification_results = run_verification_commands(
                     active_repo_path,
-                raw_commands,
-                blocked_commands,
-                timeout_seconds,
-                hooks_config=hooks_config,
+                    raw_commands,
+                    blocked_commands,
+                    timeout_seconds,
+                    hooks_config=hooks_config,
                 )
                 _write_verification(
                     run_dir / f"verification_attempt_{fix_attempts + 1}.txt", verification_results
@@ -1137,6 +1166,7 @@ def run_orchestrator(
                 passed = verification_passed(verification_results)
 
             final_diff = get_git_diff(active_repo_path)
+            _enforce_changed_file_limit(active_repo_path, max_changed_files, "fixer loop")
             _write_markdown(run_dir / "diff_after_fixes.patch", final_diff or "# No Diff\n")
             reviewer_output = _run_phase(
                 phase="reviewer",
@@ -1174,18 +1204,25 @@ def run_orchestrator(
             else:
                 details["review verdict"] = "not provided"
 
-            status_lines = [line for line in get_git_status(active_repo_path).splitlines() if line]
+            status_lines = _changed_files(active_repo_path)
             details["verification"] = "passed" if passed else "failed after fix limit"
             details["fix attempts"] = fix_attempts
             details["changed files"] = len(status_lines)
             details["diff lines"] = len(final_diff.splitlines())
-            details["risks"] = (
-                "Verification remains failing; inspect fixer and reviewer output."
-                if not passed
-                else "Review the reviewer output before committing any changes."
-            )
+            if not passed:
+                details["risks"] = (
+                    "Verification remains failing; inspect fixer and reviewer output."
+                )
+            elif review_verdict is not None and review_verdict.verdict == "reject":
+                details["risks"] = "Reviewer rejected the change; do not land it."
+                details["next steps"] = "Inspect and resolve the reviewer findings."
+            elif review_verdict is not None and review_verdict.verdict == "revise":
+                details["risks"] = "Reviewer requested changes before acceptance."
+                details["next steps"] = "Run a bounded revision pass for the reviewer findings."
+            else:
+                details["risks"] = "Review the reviewer output before committing any changes."
             details["memory"] = _record_memory_update(memory_config, reviewer_output)
-            status = "completed" if passed else "verification-failed"
+            status = _result_status(passed, review_verdict)
             _record_run_history(
                 memory_config, task=task, status=status, fix_attempts=fix_attempts, run_dir=run_dir
             )

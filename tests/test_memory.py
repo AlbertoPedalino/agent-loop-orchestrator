@@ -41,6 +41,15 @@ def test_resolve_rejects_bad_types(tmp_path: Path) -> None:
         resolve_memory_config({"memory": {"file": ""}}, tmp_path)
 
 
+@pytest.mark.parametrize("field", ["file", "history_file"])
+def test_resolve_rejects_paths_outside_repo(tmp_path: Path, field: str) -> None:
+    with pytest.raises(ValueError, match="inside the target repository"):
+        resolve_memory_config({"memory": {field: "../outside.md"}}, tmp_path)
+
+    with pytest.raises(ValueError, match="inside the target repository"):
+        resolve_memory_config({"memory": {field: str(tmp_path.parent / "outside.md")}}, tmp_path)
+
+
 def test_load_missing_returns_empty(tmp_path: Path) -> None:
     cfg = resolve_memory_config({}, tmp_path)
     assert load_memory(cfg) == ""

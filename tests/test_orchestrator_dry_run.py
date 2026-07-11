@@ -5,10 +5,48 @@ from pathlib import Path
 import pytest
 
 from agent import orchestrator
+from agent.review_gate import ReviewVerdict
 from agent.subagents import SubagentConfig
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_CONFIG = PROJECT_ROOT / "agent" / "resources" / "configs" / "default.yaml"
+
+
+@pytest.mark.parametrize("value", ["false", 0, 1, None])
+def test_config_booleans_are_not_coerced(value: object) -> None:
+    with pytest.raises(ValueError, match="must be a boolean"):
+        orchestrator._optional_bool({"allow_dirty": value}, "allow_dirty")
+
+
+def test_changed_file_limit_is_enforced_after_any_write_phase(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        orchestrator,
+        "get_git_status",
+        lambda path: "\n".join(f"?? file-{index}.py" for index in range(3)),
+    )
+
+    with pytest.raises(RuntimeError, match="after fixer attempt 1: 3 > 2"):
+        orchestrator._enforce_changed_file_limit(tmp_path, 2, "fixer attempt 1")
+
+
+@pytest.mark.parametrize(
+    ("passed", "verdict", "expected"),
+    [
+        (False, None, "verification-failed"),
+        (True, None, "completed"),
+        (True, "approve", "completed"),
+        (True, "revise", "review-revise"),
+        (True, "reject", "review-rejected"),
+    ],
+)
+def test_result_status_honours_review_gate(
+    passed: bool, verdict: str | None, expected: str
+) -> None:
+    parsed = ReviewVerdict(verdict, []) if verdict is not None else None
+    assert orchestrator._result_status(passed, parsed) == expected
 
 
 def _write_cleanup_config(
@@ -102,7 +140,7 @@ def test_dry_run_does_not_call_claude_or_verification(
     result = orchestrator.run_orchestrator(
         repo_path=tmp_path,
         task="test task",
-        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        config_path=DEFAULT_CONFIG,
         dry_run=True,
     )
 
@@ -135,7 +173,7 @@ def test_plan_only_dry_run_writes_only_planner_artifacts(
     result = orchestrator.run_orchestrator(
         repo_path=tmp_path,
         task="test task",
-        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        config_path=DEFAULT_CONFIG,
         dry_run=True,
         plan_only=True,
     )
@@ -175,7 +213,7 @@ def test_plan_only_runs_planner_and_skips_later_phases(
     result = orchestrator.run_orchestrator(
         repo_path=tmp_path,
         task="test task",
-        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        config_path=DEFAULT_CONFIG,
         plan_only=True,
     )
 
@@ -205,7 +243,7 @@ def test_plan_only_reports_preexisting_changed_file_count(
     result = orchestrator.run_orchestrator(
         repo_path=tmp_path,
         task="test task",
-        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        config_path=DEFAULT_CONFIG,
         plan_only=True,
     )
 
@@ -233,7 +271,7 @@ def test_plan_only_writes_memory_from_emitted_block(
     result = orchestrator.run_orchestrator(
         repo_path=tmp_path,
         task="inspect",
-        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        config_path=DEFAULT_CONFIG,
         plan_only=True,
     )
 
@@ -266,7 +304,7 @@ def test_memory_injected_into_planner_prompt(
     orchestrator.run_orchestrator(
         repo_path=tmp_path,
         task="inspect",
-        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        config_path=DEFAULT_CONFIG,
         plan_only=True,
     )
 
@@ -298,7 +336,7 @@ def test_plan_only_reuses_existing_worktree(
     result = orchestrator.run_orchestrator(
         repo_path=tmp_path,
         task="test task",
-        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        config_path=DEFAULT_CONFIG,
         plan_only=True,
         use_worktree=True,
         base_branch="base",
@@ -329,7 +367,7 @@ def test_plan_only_creates_worktree_when_no_matching_worktree_exists(
     result = orchestrator.run_orchestrator(
         repo_path=tmp_path,
         task="test task",
-        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        config_path=DEFAULT_CONFIG,
         plan_only=True,
         use_worktree=True,
         base_branch="base",
@@ -356,7 +394,7 @@ def test_setup_only_dry_run_still_skips_planner(
     result = orchestrator.run_orchestrator(
         repo_path=tmp_path,
         task="test task",
-        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        config_path=DEFAULT_CONFIG,
         dry_run=True,
         setup_only=True,
     )
@@ -385,7 +423,7 @@ def test_setup_only_reuses_existing_worktree(
     result = orchestrator.run_orchestrator(
         repo_path=tmp_path,
         task="setup only",
-        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        config_path=DEFAULT_CONFIG,
         use_worktree=True,
         base_branch="base",
         agent_branch="agent/plan",
@@ -429,7 +467,7 @@ def test_full_run_reuses_existing_worktree(
     result = orchestrator.run_orchestrator(
         repo_path=tmp_path,
         task="full run",
-        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        config_path=DEFAULT_CONFIG,
         use_worktree=True,
         base_branch="base",
         agent_branch="agent/plan",
@@ -470,7 +508,7 @@ def test_full_run_creates_worktree_when_missing(
     result = orchestrator.run_orchestrator(
         repo_path=tmp_path,
         task="full run",
-        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        config_path=DEFAULT_CONFIG,
         use_worktree=True,
         base_branch="base",
         agent_branch="agent/plan",
@@ -647,7 +685,10 @@ def test_write_phase_rejects_protected_branch_before_claude(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     subagent = SubagentConfig(
-        "implementer", "impl", ["Edit", "Bash"], 1, PROJECT_ROOT / "prompts" / "implementer.md"
+        name="implementer",
+        description="impl",
+        allowed_tools=["Edit", "Bash"],
+        prompt_template=PROJECT_ROOT / "agent" / "resources" / "prompts" / "implementer.md",
     )
     monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "main")
     monkeypatch.setattr(
@@ -673,7 +714,10 @@ def test_read_only_phase_allowed_on_protected_branch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     subagent = SubagentConfig(
-        "planner", "plan", ["Read", "Grep", "Glob"], 1, PROJECT_ROOT / "prompts" / "planner.md"
+        name="planner",
+        description="plan",
+        allowed_tools=["Read", "Grep", "Glob"],
+        prompt_template=PROJECT_ROOT / "agent" / "resources" / "prompts" / "planner.md",
     )
     captured: dict[str, object] = {}
     monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "main")
@@ -704,7 +748,10 @@ def test_codex_phase_dispatches_to_codex_runner(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     subagent = SubagentConfig(
-        "planner", "plan", ["Read", "Grep", "Glob"], 1, PROJECT_ROOT / "prompts" / "planner.md"
+        name="planner",
+        description="plan",
+        allowed_tools=["Read", "Grep", "Glob"],
+        prompt_template=PROJECT_ROOT / "agent" / "resources" / "prompts" / "planner.md",
     )
     captured: dict[str, object] = {}
     monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "main")
@@ -740,7 +787,10 @@ def test_api_claude_phase_receives_max_budget(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     subagent = SubagentConfig(
-        "planner", "plan", ["Read", "Grep", "Glob"], 1, PROJECT_ROOT / "prompts" / "planner.md"
+        name="planner",
+        description="plan",
+        allowed_tools=["Read", "Grep", "Glob"],
+        prompt_template=PROJECT_ROOT / "agent" / "resources" / "prompts" / "planner.md",
     )
     captured: dict[str, object] = {}
     monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "main")
@@ -771,7 +821,10 @@ def test_claude_phase_rejects_max_budget_with_cli_backend(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     subagent = SubagentConfig(
-        "planner", "plan", ["Read", "Grep", "Glob"], 1, PROJECT_ROOT / "prompts" / "planner.md"
+        name="planner",
+        description="plan",
+        allowed_tools=["Read", "Grep", "Glob"],
+        prompt_template=PROJECT_ROOT / "agent" / "resources" / "prompts" / "planner.md",
     )
     monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "main")
     monkeypatch.setattr(
@@ -798,7 +851,10 @@ def test_codex_phase_rejects_max_budget_before_runner(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     subagent = SubagentConfig(
-        "planner", "plan", ["Read", "Grep", "Glob"], 1, PROJECT_ROOT / "prompts" / "planner.md"
+        name="planner",
+        description="plan",
+        allowed_tools=["Read", "Grep", "Glob"],
+        prompt_template=PROJECT_ROOT / "agent" / "resources" / "prompts" / "planner.md",
     )
     monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "main")
     monkeypatch.setattr(

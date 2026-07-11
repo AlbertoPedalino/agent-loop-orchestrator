@@ -20,10 +20,10 @@
 - `review_gate.py` parses fenced ```verdict``` JSON; `memory.py` project memory + history jsonl; `report.py` writes `report.md`.
 
 ## Worktree cleanup (implemented, opt-in)
-`git.delete_worktree_on_success` / `git.delete_worktree_on_failure` (both default false, `configs/default.yaml`). `_cleanup_worktree_if_requested` (orchestrator.py, ~line 584): skips when not requested, no worktree, worktree reused (`created_for_run` false), worktree == source repo, or dirty tree. README Roadmap removed 2026-07-07 because this shipped.
+`git.delete_worktree_on_success` / `git.delete_worktree_on_failure` default false in the packaged fallback config. `_cleanup_worktree_if_requested` skips when not requested, no worktree, worktree reused, worktree == source repo, or dirty tree.
 
 ## Config discovery
-`--config` else `<repo>/.agent-loop/config.yaml` → `<repo>/.agent-loop.yaml` → orchestrator `configs/default.yaml`. Run files: only CLI override allowed is `--repo-path`; all other flags mutually exclusive with `--run-file`.
+`--config` else `<repo>/.agent-loop/config.yaml` -> `<repo>/.agent-loop.yaml` -> packaged `agent/resources/configs/default.yaml`. Run files: only CLI override allowed is `--repo-path`; all other flags mutually exclusive with `--run-file`.
 
 ## Gotchas
 - Verification commands run without shell and must be findable executables: bare `pytest -q` fails with `[WinError 2]` when pytest not on orchestrator PATH (seen 2026-07-07 fix-readme run — "failed after fix limit" was environmental, not the diff). Prefer `python -m pytest -q` or absolute venv path in `verification.commands`.

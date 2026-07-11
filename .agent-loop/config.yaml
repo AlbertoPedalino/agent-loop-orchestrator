@@ -1,5 +1,5 @@
 # Target-local config for running the loop on this repository itself.
-# Discovered automatically (before configs/default.yaml) when no --config is given.
+# Discovered automatically before the packaged fallback config.
 
 project:
   name: agent-loop-orchestrator
@@ -10,9 +10,9 @@ verification:
   commands:
     # The verifier runs without a shell and resolves argv[0] via PATH
     # (shutil.which); bare `pytest` is not on the orchestrator's PATH, so use
-    # the repo venv's python explicitly.
-    - C:\Users\alber\Documents\dev\agent-loop-orchestrator\.venv\Scripts\python.exe -m pytest -q
-    - C:\Users\alber\Documents\dev\agent-loop-orchestrator\.venv\Scripts\python.exe -m ruff check .
+    # the active Python explicitly.
+    - python -m pytest -q
+    - python -m ruff check .
     - git diff --check
 
 project_context:

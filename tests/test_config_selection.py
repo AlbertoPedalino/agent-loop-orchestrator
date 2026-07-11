@@ -46,8 +46,22 @@ def test_falls_back_to_generic_default(tmp_path: Path) -> None:
     selection = resolve_config_selection(tmp_path, fallback_config_path=fallback_path)
 
     assert selection == ConfigSelection(
-        fallback_path.resolve(), "fallback orchestrator configs/default.yaml"
+        fallback_path.resolve(), "packaged fallback agent/resources/configs/default.yaml"
     )
+
+
+def test_packaged_fallback_and_phase_resources_exist(tmp_path: Path) -> None:
+    selection = resolve_config_selection(tmp_path)
+    resource_root = selection.path.parent.parent
+
+    assert selection.path.is_file()
+    assert (resource_root / "configs" / "subagents.default.yaml").is_file()
+    assert {path.name for path in (resource_root / "prompts").glob("*.md")} == {
+        "planner.md",
+        "implementer.md",
+        "fixer.md",
+        "reviewer.md",
+    }
 
 
 def test_cli_uses_target_local_config_when_config_is_omitted(

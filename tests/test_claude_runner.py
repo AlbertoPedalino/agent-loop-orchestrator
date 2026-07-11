@@ -60,7 +60,7 @@ def test_build_command_appends_system_prompt_when_supplied() -> None:
     ]
 
 
-def test_build_command_never_passes_max_turns() -> None:
+def test_build_command_does_not_invent_unsupported_turn_flag() -> None:
     command = _build_claude_command(
         allowed_tools=None,
         disallowed_tools=None,

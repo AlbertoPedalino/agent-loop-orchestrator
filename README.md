@@ -40,7 +40,7 @@ For development, a plain editable install inside a venv provides the same comman
 - `agent/policies.py` implements the blocked-command checks that keep runs bounded.
 - `agent/permissions.py` resolves provider-agnostic per-phase tool permissions (allow/deny lists, sandbox mode).
 - `agent/verifier.py` runs the configured verification commands under policy checks.
-- `agent/subagents.py` loads named phase settings from YAML.
+- `agent/subagents.py` loads named phase settings from packaged YAML resources.
 - `agent/skills.py` resolves per-phase skill policy (granted natively to Claude, inlined for Codex).
 - `agent/run_file.py` parses and validates YAML run files.
 - `agent/git_utils.py` creates local-only worktrees and rejects protected agent branch names.
@@ -114,9 +114,9 @@ Defaults block commits, pushes, W&B sweeps, notebook execution, destructive Dock
 
 Runs may also declare custom hooks under a `hooks:` mapping in the run configuration (including a target-local one — the same trust model as `verification.commands`). Events: `pre_phase`, `post_phase`, `pre_command`, `post_command`. Each entry is a command string or `{command, timeout_seconds}`; commands run without a shell, are validated against `blocked_commands` at load time, and receive context via `AGENT_LOOP_*` environment variables (`EVENT`, `REPO`, `PHASE`, `AGENT`, `BACKEND`, `STATUS`, `OUTPUT_LENGTH`, `COMMAND`, `RETURN_CODE`). `pre_*` hooks are gates: a non-zero exit aborts the phase (recorded as a `failed` phase event) or skips the command (recorded as its result). `post_*` hooks are informational: failures are logged and never change the run outcome. Every phase — successful or failed — is recorded in `phase_events.jsonl` with `status`, `started_at`, and `duration_seconds`.
 
-`configs/subagents.default.yaml` defines the planner, implementer, fixer, and reviewer with their `allowed_tools`, optional `agent`, optional `backend`, optional `permission_mode`, and optional `skills`. Claude phases are launched with `--allowedTools`, so planner and reviewer (no write tools) physically cannot edit, and implementer/fixer run with `permission_mode: acceptEdits` so the headless CLI can apply changes. Codex phases use the same mutability model to choose `read-only` vs `workspace-write` sandbox. A phase whose allowed tools include no write-capable tool (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Bash`) is treated as read-only.
+The packaged `agent/resources/configs/subagents.default.yaml` defines the planner, implementer, fixer, and reviewer with their `allowed_tools`, optional `agent`, optional `backend`, optional `permission_mode`, and optional `skills`. Claude phases are launched with `--allowedTools`, so planner and reviewer (no write tools) physically cannot edit, and implementer/fixer run with `permission_mode: acceptEdits` so the headless CLI can apply changes. Codex phases use the same mutability model to choose `read-only` vs `workspace-write` sandbox. A phase whose allowed tools include no write-capable tool (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Bash`) is treated as read-only. Per-phase execution is bounded by `limits.phase_timeout_seconds`; no provider-neutral turn cap is exposed because Codex CLI has no deterministic turn-limit option.
 
-A target repository can customize phases without touching the orchestrator: an optional `.agent-loop/subagents.yaml` in the target repo is merged field-by-field over the defaults, so an entry may set only `skills` and inherit the rest. An overridden field *replaces* the default value (a `skills` list is not appended). The overlay is deliberately unprivileged: it may set only `description`, `prompt_template`, `max_turns`, and `skills`, and only for subagents the defaults define — it can never change `allowed_tools`, `permission_mode`, `agent`, or `backend`, so a target repository (or an agent-written branch) cannot widen its own permissions. It is also read from the source repository as launched, never from an agent worktree or branch. Relative `prompt_template` paths in the overlay resolve against the target repository; defaults keep resolving against the orchestrator. An explicit `--subagents-config` takes full control and skips the overlay. The resolved selection is recorded in the run report as `subagents source`.
+A target repository can customize phases without touching the orchestrator: an optional `.agent-loop/subagents.yaml` in the target repo is merged field-by-field over the defaults, so an entry may set only `skills` and inherit the rest. An overridden field *replaces* the default value (a `skills` list is not appended). The overlay is deliberately unprivileged: it may set only `description`, `prompt_template`, and `skills`, and only for subagents the defaults define — it can never change `allowed_tools`, `permission_mode`, `agent`, or `backend`, so a target repository (or an agent-written branch) cannot widen its own permissions. It is also read from the source repository as launched, never from an agent worktree or branch. Relative `prompt_template` paths in the overlay resolve against the target repository; defaults keep resolving against the installed package resources. An explicit `--subagents-config` takes full control and skips the overlay. The resolved selection is recorded in the run report as `subagents source`.
 
 A phase may declare `skills` (`name` or `plugin:name`); an entry can also be a `{name, args}` mapping to request a skill mode (e.g. `{name: caveman:caveman, args: wenyan-ultra}`), passed through verbatim to the skill invocation. Skills are policy, not payload: with the Claude backend the CLI discovers skill content natively (target repository `.claude/skills/`, user scope, plugins), so the orchestrator only grants the `Skill` tool and appends a system-prompt instruction to invoke them. With the Codex backend, which has no skill loader, the `SKILL.md` body is inlined into the phase prompt, resolved from the same sources the Claude CLI uses: the target repository, the user scope (`~/.claude/skills/`), or — for `plugin:name` — the installed plugin snapshot listed in `~/.claude/plugins/installed_plugins.json`. A skill that cannot be resolved fails the phase with an explicit error.
 
@@ -218,9 +218,9 @@ Memory is stored in the main repository (not a throwaway worktree) so it persist
 ```yaml
 memory:
   enabled: true                 # set false to disable injection and updates
-  file: .agent-loop/memory.md   # path relative to the target repository root
+  file: .agent-loop/memory.md   # must resolve inside the target repository
   history: true                 # record run outcomes and inject recent ones
-  history_file: .agent-loop/history.jsonl
+  history_file: .agent-loop/history.jsonl # must resolve inside the repository
 ```
 
 Alongside curated memory, the loop appends one JSON line per run to a history log (timestamp, task summary, status, fix attempts, run directory) and injects the most recent entries into the planner prompt as a "Recent Run History" section, so a new run knows how the last attempts on this repository went and can avoid repeating an approach that just failed.
@@ -262,7 +262,7 @@ When `--config` is omitted, configuration is discovered in this order:
 
 1. `<repo-path>/.agent-loop/config.yaml`
 2. `<repo-path>/.agent-loop.yaml`
-3. This repository's generic `configs/default.yaml`
+3. The installed package's generic `agent/resources/configs/default.yaml`
 
 Pass `--config path/to/config.yaml` to override discovery explicitly. Every run records both the selected path and selection method in `config_source.md` and `report.md`.
 
@@ -476,7 +476,7 @@ Semantics:
 
 - **Dependencies**: `depends_on` names stable queue `id` values. A dependent task stays in `queued/` until every dependency has a `done/` result. If a dependency is in `failed/`, the dependent task is moved to `failed/` with a `dependency-failed` sidecar. Missing dependencies stay queued and `list` reports them as waiting; duplicate ids and dependency cycles are failed explicitly so the queue does not wedge silently.
 
-- **Claiming** uses an exclusive `.claim` marker (`O_CREAT | O_EXCL`) before moving a task to `running/`, because a bare rename is not a reliable mutex on Windows (`MoveFileExW` renames by handle, so two racing renames can both report success). Multiple workers — threads or separate processes — can safely share one queue.
+- **Claiming** uses an exclusive `.claim` marker (`O_CREAT | O_EXCL`) before moving a task to `running/`, because a bare rename is not a reliable mutex on Windows (`MoveFileExW` renames by handle, so two racing renames can both report success). Multiple workers — threads or separate processes — can safely share one queue. Non-worktree tasks additionally take a cross-process OS lock keyed by repository path, so separate `--workers 1` processes cannot edit the same checkout concurrently.
 - **Parallelism**: with `--workers` above 1, every task must run in an isolated worktree (`use_worktree: true` or `branch_mode: worktree`); tasks without isolation are failed with a validation error instead of letting two agents edit the same working tree.
 - **Retries** re-enqueue a crashed task with an exponential-backoff `not_before` timestamp. When the failed attempt already produced a plan, the retry records `resume_from` and skips the planner phase, reusing `planner_output.md` from the failed run. `retry_on_verification_failure: true` extends this to runs whose verification never passed.
 - **Aggregate limits**: `--max-tasks` bounds how many attempts one `run` invocation claims; `--max-minutes` bounds its wall-clock time — the safety rails for an unattended session.
@@ -485,7 +485,7 @@ Semantics:
 
 ## Review verdict
 
-The reviewer phase is asked to end with a fenced ` ```verdict ``` ` block containing `{"verdict": "approve" | "revise" | "reject", "findings": [...]}`. The orchestrator parses it deterministically, saves `review_verdict.json` in the run directory, records the verdict in the report, and exposes it on the run result so automation (like the queue) can branch on the review outcome without re-reading prose. A missing or malformed block degrades to "not provided" and never fails the run.
+The reviewer phase is asked to end with a fenced ` ```verdict ``` ` block containing `{"verdict": "approve" | "revise" | "reject", "findings": [...]}`. The orchestrator parses it deterministically, saves `review_verdict.json` in the run directory, records the verdict in the report, and exposes it on the run result so automation (like the queue) can branch on the review outcome without re-reading prose. A missing or malformed block degrades to "not provided" and never fails the run. A valid `revise` or `reject` produces `review-revise` or `review-rejected` and a non-zero direct CLI exit.
 
 ## Safety notes
 

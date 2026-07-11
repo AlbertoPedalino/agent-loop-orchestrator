@@ -13,6 +13,7 @@ from agent.run_file import RunFileConfig, load_run_file, resolve_task_text
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_CONFIG = PROJECT_ROOT / "agent" / "resources" / "configs" / "default.yaml"
 
 
 def _write_run_file(path: Path, body: str) -> Path:
@@ -476,7 +477,7 @@ def test_run_file_path_recorded_in_report_and_artifacts(
     result = orchestrator.run_orchestrator(
         repo_path=tmp_path,
         task="test task",
-        config_path=PROJECT_ROOT / "configs" / "default.yaml",
+        config_path=DEFAULT_CONFIG,
         dry_run=True,
         run_file_path=run_file_path,
         launched_from="run-file",

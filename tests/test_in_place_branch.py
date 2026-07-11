@@ -11,7 +11,7 @@ from agent.git_utils import InPlaceBranchResult
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "default.yaml"
+DEFAULT_CONFIG = PROJECT_ROOT / "agent" / "resources" / "configs" / "default.yaml"
 
 
 # --------------------------------------------------------------------------- #

@@ -56,7 +56,9 @@ def get_git_status(path: Path, timeout_seconds: int = 30) -> str:
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be greater than zero")
     try:
-        result = _run_git(path, "status", "--short", timeout=timeout_seconds)
+        result = _run_git(
+            path, "status", "--short", "--untracked-files=all", timeout=timeout_seconds
+        )
     except subprocess.TimeoutExpired:
         return f"Git status timed out after {timeout_seconds} seconds."
     except OSError as error:

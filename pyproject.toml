@@ -30,4 +30,7 @@ target-version = "py311"
 line-length = 100
 
 [tool.setuptools]
-packages = ["agent"]
+packages = ["agent", "agent.resources", "agent.resources.configs", "agent.resources.prompts"]
+
+[tool.setuptools.package-data]
+agent = ["resources/configs/*.yaml", "resources/prompts/*.md"]

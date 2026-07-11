@@ -355,7 +355,15 @@ def main() -> int:
     print(f"Config: {config_selection.path} ({config_selection.source})")
     print(f"Launched from: {invocation.launched_from}")
     print(f"Repo path: {invocation.repo_path} ({invocation.repo_path_source})")
-    return 0
+    successful_statuses = {
+        "completed",
+        "plan-only-complete",
+        "setup-complete",
+        "dry-run",
+        "dry-run-plan-only",
+        "dry-run-setup",
+    }
+    return 0 if result.status in successful_statuses else 1
 
 
 if __name__ == "__main__":

@@ -66,11 +66,16 @@ class MemoryConfig:
     history_path: Path | None = None
 
 
-def _resolve_repo_file(value: str, repo_path: Path) -> Path:
+def _resolve_repo_file(value: str, repo_path: Path, field: str) -> Path:
     raw_path = Path(value).expanduser()
     resolved_repo = repo_path.expanduser().resolve()
     path = raw_path if raw_path.is_absolute() else resolved_repo / raw_path
-    return path.resolve()
+    resolved_path = path.resolve()
+    if not resolved_path.is_relative_to(resolved_repo):
+        raise ValueError(
+            f"memory.{field} must resolve inside the target repository: {resolved_path}"
+        )
+    return resolved_path
 
 
 def resolve_memory_config(config: dict[str, Any], repo_path: Path) -> MemoryConfig:
@@ -99,9 +104,9 @@ def resolve_memory_config(config: dict[str, Any], repo_path: Path) -> MemoryConf
         raise ValueError("memory.history_file must be a non-empty string")
     return MemoryConfig(
         enabled=enabled,
-        path=_resolve_repo_file(file_value, repo_path),
+        path=_resolve_repo_file(file_value, repo_path, "file"),
         history_enabled=history_enabled,
-        history_path=_resolve_repo_file(history_file_value, repo_path),
+        history_path=_resolve_repo_file(history_file_value, repo_path, "history_file"),
     )
 
 

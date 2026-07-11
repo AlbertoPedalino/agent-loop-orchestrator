@@ -30,7 +30,7 @@ repo_path: ../external/GM-Board   # optional; omit to use the launch cwd
 # config: path/to/config.yaml     # optional; omit to keep target-local
                                   # discovery: <repo>/.agent-loop/config.yaml,
                                   # then <repo>/.agent-loop.yaml, then the
-                                  # orchestrator's configs/default.yaml
+                                  # installed package's fallback configuration
 
 agent: claude                     # claude | codex          (default: claude)
 backend: cli                      # cli | api               (default: cli)

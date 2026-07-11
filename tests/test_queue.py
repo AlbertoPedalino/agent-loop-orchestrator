@@ -11,6 +11,7 @@ from agent.orchestrator import OrchestrationResult
 from agent.queue import (
     QueueTask,
     QueueTaskError,
+    _RepositoryLock,
     _task_text_with_findings,
     claim_next,
     enqueue,
@@ -610,6 +611,19 @@ def test_run_queue_parallel_accepts_worktree_tasks(tmp_path: Path) -> None:
 
     assert summary.succeeded == 3
     assert summary.failed == 0
+
+
+def test_repository_lock_blocks_a_second_process_handle(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    first = _RepositoryLock(tmp_path / "queue", repo)
+    second = _RepositoryLock(tmp_path / "queue", repo)
+
+    assert first.try_acquire()
+    assert not second.try_acquire()
+    first.release()
+    assert second.try_acquire()
+    second.release()
 
 
 def test_claim_moves_unparseable_yaml_to_failed(tmp_path: Path) -> None:

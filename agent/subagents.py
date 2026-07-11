@@ -22,7 +22,18 @@ TARGET_OVERLAY_RELATIVE_PATH = Path(".agent-loop") / "subagents.yaml"
 # (allowed_tools, permission_mode, agent, backend) are excluded so a target
 # repository can customize instructions but never widen its own tool policy;
 # full control requires an explicit --subagents-config chosen by the operator.
-OVERLAY_ALLOWED_FIELDS = frozenset({"description", "prompt_template", "max_turns", "skills"})
+OVERLAY_ALLOWED_FIELDS = frozenset({"description", "prompt_template", "skills"})
+SUBAGENT_FIELDS = frozenset(
+    {
+        "description",
+        "allowed_tools",
+        "prompt_template",
+        "agent",
+        "backend",
+        "permission_mode",
+        "skills",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -30,7 +41,6 @@ class SubagentConfig:
     name: str
     description: str
     allowed_tools: list[str]
-    max_turns: int
     prompt_template: Path
     agent: str | None = None
     backend: str | None = None
@@ -82,14 +92,16 @@ def _absolutize_prompt_template(entry: dict[str, Any], project_root: Path) -> di
 
 def _parse_subagent_entry(name: str, entry: dict[str, Any]) -> SubagentConfig:
     """Validate one raw subagent mapping (with absolute prompt path) into a config."""
+    unknown_fields = sorted(set(entry) - SUBAGENT_FIELDS)
+    if unknown_fields:
+        raise ValueError(
+            f"Subagent '{name}' has unknown field(s): {', '.join(unknown_fields)}"
+        )
     description = _required_string(entry, "description", name)
     prompt_value = _required_string(entry, "prompt_template", name)
     tools = entry.get("allowed_tools")
-    max_turns = entry.get("max_turns")
     if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
         raise ValueError(f"Subagent '{name}' requires an 'allowed_tools' string list")
-    if not isinstance(max_turns, int) or max_turns <= 0:
-        raise ValueError(f"Subagent '{name}' requires a positive integer 'max_turns'")
     agent = entry.get("agent")
     if agent is not None and agent not in VALID_AGENT_PROVIDERS:
         raise ValueError(f"Subagent '{name}' agent must be 'claude' or 'codex'")
@@ -110,7 +122,6 @@ def _parse_subagent_entry(name: str, entry: dict[str, Any]) -> SubagentConfig:
         name=name,
         description=description,
         allowed_tools=tools,
-        max_turns=max_turns,
         prompt_template=prompt_path,
         agent=agent,
         backend=backend,

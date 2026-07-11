@@ -32,6 +32,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Mapping
+import hashlib
 import json
 import os
 import threading
@@ -61,6 +62,64 @@ RETRY_BACKOFF_BASE_SECONDS = 30.0
 _CLAIM_STALE_SECONDS = 300.0
 
 _STATE_DIRS = ("queued", "running", "done", "failed")
+
+
+class _RepositoryLock:
+    """Cross-process advisory lock serializing in-place work per repository."""
+
+    def __init__(self, queue_dir: Path, repo_path: Path) -> None:
+        identity = str(repo_path.expanduser().resolve()).casefold().encode("utf-8")
+        digest = hashlib.sha256(identity).hexdigest()
+        lock_dir = queue_dir.expanduser().resolve() / ".repo-locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        self.path = lock_dir / f"{digest}.lock"
+        self._handle: Any = None
+
+    def try_acquire(self) -> bool:
+        if self._handle is not None:
+            return True
+        handle = self.path.open("a+b")
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, BlockingIOError):
+            handle.close()
+            return False
+        self._handle = handle
+        return True
+
+    def acquire(self, poll_seconds: float) -> None:
+        while not self.try_acquire():
+            time.sleep(poll_seconds)
+
+    def release(self) -> None:
+        if self._handle is None:
+            return
+        handle = self._handle
+        self._handle = None
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 # Queue-only metadata; everything else in a task file is a run-file field.
 # "last_error" is written by requeue helpers and must survive re-parsing.
@@ -846,7 +905,7 @@ def _handle_outcome(
 
     verdict = result.review_verdict.verdict if result.review_verdict is not None else None
     if (
-        result.status == "completed"
+        result.status in {"completed", "review-revise"}
         and verdict == "revise"
         and task.retry_on_review_revise
         and task.review_cycles < task.max_review_cycles
@@ -858,10 +917,12 @@ def _handle_outcome(
 
     # A rejected review gates a verification-green run out of done/: landing it
     # would contradict the reviewer, so a human has to look at failed/.
-    rejected = result.status == "completed" and verdict == "reject"
+    rejected = result.status == "review-rejected" or (
+        result.status == "completed" and verdict == "reject"
+    )
     outcome = (
         "failed"
-        if rejected or result.status in {"verification-failed", "failed"}
+        if rejected or result.status in {"verification-failed", "review-revise", "failed"}
         else "done"
     )
     if rejected:
@@ -939,11 +1000,19 @@ def _worker_loop(
         logger.info("Queue worker starting %s (attempt %d)", task.name, task.attempts + 1)
         result: OrchestrationResult | None = None
         caught: Exception | None = None
+        repository_lock: _RepositoryLock | None = None
         try:
+            if not task.uses_worktree:
+                assert task.run.repo_path is not None
+                repository_lock = _RepositoryLock(queue_dir, task.run.repo_path)
+                repository_lock.acquire(poll_seconds)
             result = executor(task)
         except Exception as error:  # noqa: BLE001 - a task crash must not kill the worker
             caught = error
             logger.warning("Queue task %s attempt failed: %s", task.name, error)
+        finally:
+            if repository_lock is not None:
+                repository_lock.release()
         try:
             _handle_outcome(queue_dir, task, result, caught, state, backoff_base_seconds)
         finally:

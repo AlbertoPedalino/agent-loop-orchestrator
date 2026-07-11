@@ -41,7 +41,6 @@ def test_failed_phase_is_recorded_in_phase_events(
         name="planner",
         description="plan",
         allowed_tools=["Read"],
-        max_turns=2,
         prompt_template=prompt_path,
     )
     monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "feat/x")
@@ -178,7 +177,6 @@ def test_pre_phase_hook_veto_is_recorded_as_failed_event(
         name="planner",
         description="plan",
         allowed_tools=["Read"],
-        max_turns=2,
         prompt_template=prompt_path,
     )
     monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "feat/x")

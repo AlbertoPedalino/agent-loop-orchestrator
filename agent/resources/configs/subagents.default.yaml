@@ -5,19 +5,10 @@ subagents:
       - Read
       - Grep
       - Glob
-    max_turns: 6
     prompt_template: prompts/planner.md
-    # No write tools -> read-only; runs without an edit permission mode.
 
   implementer:
     description: "Code editing agent."
-    # Optional per-phase skills ('name' or 'plugin:name'). With the claude
-    # backend the CLI loads skill content natively from the target repository
-    # (.claude/skills/), user scope, or plugins; the orchestrator grants the
-    # Skill tool and instructs the phase to invoke them. With the codex backend
-    # the repository-local SKILL.md body is inlined into the prompt instead.
-    # skills:
-    #   - frontend-design
     allowed_tools:
       - Read
       - Edit
@@ -25,10 +16,7 @@ subagents:
       - Bash
       - Grep
       - Glob
-    max_turns: 12
     prompt_template: prompts/implementer.md
-    # Auto-accept edits so the headless CLI can apply changes; blocked
-    # commands are still denied at the tool boundary.
     permission_mode: acceptEdits
 
   fixer:
@@ -40,7 +28,6 @@ subagents:
       - Bash
       - Grep
       - Glob
-    max_turns: 8
     prompt_template: prompts/fixer.md
     permission_mode: acceptEdits
 
@@ -50,6 +37,4 @@ subagents:
       - Read
       - Grep
       - Glob
-    max_turns: 6
     prompt_template: prompts/reviewer.md
-    # No write tools -> read-only; runs without an edit permission mode.
