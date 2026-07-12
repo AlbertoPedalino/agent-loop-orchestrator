@@ -6,6 +6,7 @@ import pytest
 
 from agent import orchestrator
 from agent.review_gate import ReviewVerdict
+from agent.skills import SkillRef
 from agent.subagents import SubagentConfig
 
 
@@ -814,6 +815,45 @@ def test_codex_phase_dispatches_to_codex_runner(
     assert output == "codex plan"
     assert captured["allowed_tools"] == ["Read", "Grep", "Glob"]
     assert captured["disallowed_tools"] == ["Bash(git push:*)"]
+
+
+def test_codex_worktree_resolves_repo_skill_from_source_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source_repo = tmp_path / "source"
+    active_worktree = tmp_path / "worktree"
+    skill_dir = source_repo / ".claude" / "skills" / "repo-style"
+    skill_dir.mkdir(parents=True)
+    active_worktree.mkdir()
+    (skill_dir / "SKILL.md").write_text("# Repo Style\nUse source conventions.", encoding="utf-8")
+    subagent = SubagentConfig(
+        name="implementer",
+        description="edit",
+        allowed_tools=["Read", "Edit"],
+        prompt_template=PROJECT_ROOT / "agent" / "resources" / "prompts" / "implementer.md",
+        skills=[SkillRef("repo-style")],
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "agent/test")
+    monkeypatch.setattr(
+        orchestrator,
+        "run_codex_prompt",
+        lambda prompt, repo_path, **kwargs: captured.update(prompt=prompt) or "done",
+    )
+
+    orchestrator._run_phase(
+        phase="implementer",
+        prompt="task",
+        task="task",
+        repo_path=active_worktree,
+        skills_repo_path=source_repo,
+        agent="codex",
+        backend="cli",
+        subagent=subagent,
+        max_budget_usd=None,
+    )
+
+    assert "Use source conventions." in str(captured["prompt"])
 
 
 def test_api_claude_phase_receives_max_budget(

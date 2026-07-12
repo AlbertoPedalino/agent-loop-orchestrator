@@ -380,6 +380,7 @@ def _run_phase(
     prompt: str,
     task: str,
     repo_path: Path,
+    skills_repo_path: Path | None = None,
     agent: str,
     backend: str,
     subagent: SubagentConfig,
@@ -410,7 +411,9 @@ def _run_phase(
             phase_allowed_tools = allowed_tools_with_skill(phase_allowed_tools)
             skills_system_prompt = format_skills_system_prompt(subagent.skills)
         else:
-            prompt = inline_skills_for_codex(prompt, subagent.skills, repo_path)
+            prompt = inline_skills_for_codex(
+                prompt, subagent.skills, skills_repo_path or repo_path
+            )
     permissions = resolve_phase_permissions(
         phase_allowed_tools, subagent.permission_mode, blocked_commands or []
     )
@@ -1141,6 +1144,7 @@ def run_orchestrator(
                     prompt=planner_prompt,
                     task=task,
                     repo_path=active_repo_path,
+                    skills_repo_path=resolved_repo_path,
                     agent=selected_agent,
                     backend=selected_backend,
                     subagent=subagents["planner"],
@@ -1197,6 +1201,7 @@ def run_orchestrator(
                 ),
                 task=task,
                 repo_path=active_repo_path,
+                skills_repo_path=resolved_repo_path,
                 agent=selected_agent,
                 backend=selected_backend,
                 subagent=subagents["implementer"],
@@ -1243,6 +1248,7 @@ def run_orchestrator(
                     ),
                     task=task,
                     repo_path=active_repo_path,
+                    skills_repo_path=resolved_repo_path,
                     agent=selected_agent,
                     backend=selected_backend,
                     subagent=subagents["fixer"],
@@ -1293,6 +1299,7 @@ def run_orchestrator(
                 ),
                 task=task,
                 repo_path=active_repo_path,
+                skills_repo_path=resolved_repo_path,
                 agent=selected_agent,
                 backend=selected_backend,
                 subagent=subagents["reviewer"],
