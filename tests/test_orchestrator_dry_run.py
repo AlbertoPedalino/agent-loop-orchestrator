@@ -856,6 +856,49 @@ def test_codex_worktree_resolves_repo_skill_from_source_repository(
     assert "Use source conventions." in str(captured["prompt"])
 
 
+def test_claude_worktree_inlines_untracked_repo_skill_from_source_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source_repo = tmp_path / "source"
+    active_worktree = tmp_path / "worktree"
+    skill_dir = source_repo / ".claude" / "skills" / "repo-style"
+    skill_dir.mkdir(parents=True)
+    active_worktree.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "# Repo Style\nUse private source conventions.", encoding="utf-8"
+    )
+    subagent = SubagentConfig(
+        name="implementer",
+        description="edit",
+        allowed_tools=["Read", "Edit"],
+        prompt_template=PROJECT_ROOT / "agent" / "resources" / "prompts" / "implementer.md",
+        skills=[SkillRef("repo-style")],
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(orchestrator, "get_current_branch", lambda path: "agent/test")
+    monkeypatch.setattr(
+        orchestrator,
+        "run_claude_prompt",
+        lambda prompt, repo_path, **kwargs: captured.update(prompt=prompt, **kwargs) or "done",
+    )
+
+    orchestrator._run_phase(
+        phase="implementer",
+        prompt="task",
+        task="task",
+        repo_path=active_worktree,
+        skills_repo_path=source_repo,
+        agent="claude",
+        backend="cli",
+        subagent=subagent,
+        max_budget_usd=None,
+    )
+
+    assert "Use private source conventions." in str(captured["prompt"])
+    assert "Skill" not in captured["allowed_tools"]
+    assert captured["append_system_prompt"] is None
+
+
 def test_api_claude_phase_receives_max_budget(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

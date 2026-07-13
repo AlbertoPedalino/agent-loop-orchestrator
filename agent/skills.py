@@ -1,12 +1,10 @@
 """First-class skill policy for phase agents.
 
 Skills are reusable instruction packages (``SKILL.md`` files) that the Claude
-CLI discovers natively from the target repository (``.claude/skills/``), the
-user scope, or installed plugins. The orchestrator therefore never loads skill
-content for the Claude backend: declaring ``skills:`` on a phase grants the
-``Skill`` tool and appends a system-prompt instruction to invoke the named
-skills. Codex has no skill loader, so for that backend the skill body is read
-from the target repository and inlined into the phase prompt instead.
+CLI discovers natively from the active repository (``.claude/skills/``), the
+user scope, or installed plugins. Repository-local skills that are intentionally
+untracked may be absent from an agent worktree; those are loaded from the source
+checkout and inlined. Codex has no skill loader, so all skill bodies are inlined.
 """
 
 from __future__ import annotations
@@ -114,6 +112,28 @@ def format_skills_system_prompt(skills: list[SkillRef]) -> str:
         "If a skill is unavailable in this environment, say so in your report "
         "and continue without it."
     )
+
+
+def split_claude_worktree_skills(
+    skills: list[SkillRef], active_repo: Path, source_repo: Path
+) -> tuple[list[SkillRef], list[SkillRef]]:
+    """Separate native Claude skills from source-only worktree skills.
+
+    An ignored repository skill is not materialized by ``git worktree add``.
+    When it exists in the source checkout but not the active worktree, return it
+    for prompt inlining. Plugins, user-scoped skills, and skills already present
+    in the worktree remain native Claude ``Skill`` invocations.
+    """
+    native: list[SkillRef] = []
+    source_only: list[SkillRef] = []
+    for ref in skills:
+        active_file = active_repo / ".claude" / "skills" / ref.name / "SKILL.md"
+        source_file = source_repo / ".claude" / "skills" / ref.name / "SKILL.md"
+        if ":" not in ref.name and not active_file.is_file() and source_file.is_file():
+            source_only.append(ref)
+        else:
+            native.append(ref)
+    return native, source_only
 
 
 def _default_claude_home() -> Path:

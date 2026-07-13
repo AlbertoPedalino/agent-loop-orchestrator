@@ -64,6 +64,7 @@ from agent.skills import (
     allowed_tools_with_skill,
     format_skills_system_prompt,
     inline_skills_for_codex,
+    split_claude_worktree_skills,
 )
 from agent.subagents import (
     SubagentConfig,
@@ -397,10 +398,10 @@ def _run_phase(
     because their tool policy prevents any modification. Write-capable phases are
     refused on a protected branch and must never leave the repository on one.
 
-    Declared skills are policy, not payload: for the Claude backend the CLI
-    discovers skill content natively, so the phase only gains the ``Skill`` tool
-    plus a system-prompt instruction to invoke them. Codex has no skill loader,
-    so repository-local skill bodies are inlined into the prompt instead.
+    Claude discovers skills natively unless a repository-local skill is absent
+    from an isolated worktree but available in the source checkout; those skill
+    instructions are inlined. Codex has no skill loader, so all declared skill
+    bodies are inlined into the prompt.
     """
     selected_agent = subagent.agent or agent
     selected_backend = subagent.backend or backend
@@ -408,8 +409,16 @@ def _run_phase(
     skills_system_prompt: str | None = None
     if subagent.skills:
         if selected_agent == "claude":
-            phase_allowed_tools = allowed_tools_with_skill(phase_allowed_tools)
-            skills_system_prompt = format_skills_system_prompt(subagent.skills)
+            native_skills, source_only_skills = split_claude_worktree_skills(
+                subagent.skills, repo_path, skills_repo_path or repo_path
+            )
+            if source_only_skills:
+                prompt = inline_skills_for_codex(
+                    prompt, source_only_skills, skills_repo_path or repo_path
+                )
+            if native_skills:
+                phase_allowed_tools = allowed_tools_with_skill(phase_allowed_tools)
+                skills_system_prompt = format_skills_system_prompt(native_skills)
         else:
             prompt = inline_skills_for_codex(
                 prompt, subagent.skills, skills_repo_path or repo_path
